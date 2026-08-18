@@ -1,7 +1,7 @@
 import type { MetadataRoute } from "next";
 
-// TODO: Replace with your production domain before deployment.
-const BASE_URL = "https://YOUR-DOMAIN-HERE.com";
+// Production site URL configured for the deployed Vercel app.
+const BASE_URL = "https://opsforge-mu.vercel.app";
 
 export default function sitemap(): MetadataRoute.Sitemap {
   const urls = [

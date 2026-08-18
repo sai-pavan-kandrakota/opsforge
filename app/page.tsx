@@ -266,7 +266,7 @@ export default function Home() {
               {
                 "@type": "WebSite",
                 "name": "OpsForge",
-                "url": "https://YOUR-DOMAIN-HERE.com", // TODO: replace with your production domain before launch
+                "url": "https://opsforge-mu.vercel.app",
                 "description": "Free online DevOps and SRE tools for Kubernetes, Terraform, Docker, GitHub Actions, AWS IAM, networking, YAML, JSON, and incident troubleshooting.",
               },
               {

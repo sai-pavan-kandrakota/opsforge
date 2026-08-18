@@ -32,29 +32,27 @@ export default function ContactPage() {
 
         <section className="rounded-2xl border border-slate-800 bg-slate-900/80 p-6">
           <h2 className="text-xl font-semibold text-white">How to reach us</h2>
-          <p className="mt-3 text-slate-300">Please use the placeholder contact address below and replace it before public launch.</p>
+          <p className="mt-3 text-slate-300">We welcome bug reports, tool suggestions, feedback, and security notices.</p>
 
           <div className="mt-4 space-y-3">
             <div className="rounded-lg border border-slate-800 bg-slate-950/40 p-4 text-sm">
               <div className="font-medium text-white">Contact email</div>
-              <div className="mt-1 text-slate-300">REPLACE_WITH_YOUR_EMAIL</div>
+              <a href="mailto:saipavaneducation@gmail.com" className="mt-1 inline-block text-slate-300 transition hover:text-white">
+                saipavaneducation@gmail.com
+              </a>
             </div>
 
             <div className="rounded-lg border border-slate-800 bg-slate-950/40 p-4 text-sm">
               <div className="font-medium text-white">Report a bug</div>
-              <div className="mt-1 text-slate-300">Open an issue in the project repository or reach out using the contact email.</div>
+              <div className="mt-1 text-slate-300">Open an issue in the project repository or email us with the details.</div>
             </div>
 
             <div className="rounded-lg border border-slate-800 bg-slate-950/40 p-4 text-sm">
               <div className="font-medium text-white">Security disclosure</div>
-              <div className="mt-1 text-slate-300">If you discover a security vulnerability, please send details to the contact email. Replace the placeholder before public launch.</div>
+              <div className="mt-1 text-slate-300">If you discover a security issue, please send the details to the contact email above.</div>
             </div>
           </div>
         </section>
-
-        <div className="mt-8 text-sm text-slate-400">
-          <p>No backend form is provided. This page displays contact details for replacement prior to launch.</p>
-        </div>
       </div>
 
       <footer className="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8">

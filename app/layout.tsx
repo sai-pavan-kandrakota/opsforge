@@ -1,0 +1,55 @@
+import type { Metadata } from "next";
+import { Geist, Geist_Mono } from "next/font/google";
+import "./globals.css";
+
+const geistSans = Geist({
+  variable: "--font-geist-sans",
+  subsets: ["latin"],
+});
+
+const geistMono = Geist_Mono({
+  variable: "--font-geist-mono",
+  subsets: ["latin"],
+});
+
+export const metadata: Metadata = {
+  title: "OpsForge - Free DevOps, Kubernetes, Terraform & SRE Tools",
+  description:
+    "Free online DevOps and SRE tools for Kubernetes, Terraform, Docker, GitHub Actions, AWS IAM, networking, YAML, JSON, and incident troubleshooting.",
+  keywords: [
+    "DevOps tools",
+    "SRE tools",
+    "Kubernetes tools",
+    "Terraform tools",
+    "Docker tools",
+    "AWS tools",
+    "CI/CD tools",
+    "Kubernetes analyzer",
+    "Terraform analyzer",
+    "Dockerfile analyzer",
+    "GitHub Actions analyzer",
+    "IAM policy analyzer",
+    "SRE troubleshooting",
+  ],
+  openGraph: {
+    title: "OpsForge - Free DevOps, Kubernetes, Terraform & SRE Tools",
+    description:
+      "Free online DevOps and SRE tools for Kubernetes, Terraform, Docker, GitHub Actions, AWS IAM, networking, YAML, JSON, and incident troubleshooting.",
+    type: "website",
+    siteName: "OpsForge",
+  },
+  twitter: {
+    card: "summary_large_image",
+  },
+};
+
+export default function RootLayout({ children }: LayoutProps<"/">) {
+  return (
+    <html
+      lang="en"
+      className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
+    >
+      <body className="min-h-full flex flex-col">{children}</body>
+    </html>
+  );
+}

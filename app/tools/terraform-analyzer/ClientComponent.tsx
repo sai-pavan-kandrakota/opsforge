@@ -128,10 +128,59 @@ output "db_endpoint" {
 
 function getResourceBlocks(terraformText: string, resourceType: string): string[] {
   const pattern = new RegExp(
-    `resource\\s+"${resourceType}"\\s+"[^"]+"\\s*\\{[\\s\\S]*?\\n\\s*\\}`,
+    `resource\\s+"${resourceType}"\\s+"[^"]+"\\s*\\{`,
     "gim",
   );
-  return terraformText.match(pattern) || [];
+  const blocks: string[] = [];
+  let match: RegExpExecArray | null;
+
+  while ((match = pattern.exec(terraformText)) !== null) {
+    const openingBraceIndex = match.index + match[0].lastIndexOf("{");
+    let depth = 0;
+    let inString = false;
+    let stringQuote = "";
+    let escaped = false;
+
+    for (let index = openingBraceIndex; index < terraformText.length; index += 1) {
+      const char = terraformText[index];
+
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+
+      if (char === "\\") {
+        escaped = true;
+        continue;
+      }
+
+      if (inString) {
+        if (char === stringQuote) {
+          inString = false;
+          stringQuote = "";
+        }
+        continue;
+      }
+
+      if (char === '"' || char === "'") {
+        inString = true;
+        stringQuote = char;
+        continue;
+      }
+
+      if (char === "{") {
+        depth += 1;
+      } else if (char === "}") {
+        depth -= 1;
+        if (depth === 0) {
+          blocks.push(terraformText.slice(openingBraceIndex, index + 1));
+          break;
+        }
+      }
+    }
+  }
+
+  return blocks;
 }
 
 function isTerraformReferenceLike(value: string): boolean {
@@ -187,36 +236,68 @@ function analyzeIamPolicy(terraformText: string): Finding[] {
 
   const findings: Finding[] = [];
   let sawPolicyBlock = false;
-  let wildcardAction = false;
-  let wildcardResource = false;
-  let broadAction = false;
-  const policyExamples: string[] = [];
+  let hasWildcardAction = false;
+  let hasWildcardResource = false;
+  let hasBroadAction = false;
+
+  function extractLiteralList(value: string): string[] {
+    const trimmed = value.trim();
+    if (!trimmed) {
+      return [];
+    }
+
+    const extracted: string[] = [];
+    const matches = trimmed.matchAll(/(?:"([^"]+)"|'([^']+)'|\b([A-Za-z0-9:*_\-]+)\b)/g);
+    for (const match of matches) {
+      const candidate = match[1] ?? match[2] ?? match[3] ?? "";
+      if (candidate) {
+        extracted.push(candidate.trim());
+      }
+    }
+
+    return extracted.filter(Boolean);
+  }
+
+  function extractPolicyValues(block: string, key: string): string[] {
+    const values: string[] = [];
+        const patterns = [
+      new RegExp(String.raw`${key}\s*=\s*(?:"([^"]+)"|'([^']+)'|\[([^\]]+)\]|([^\s,}]+))`, "gi"),
+      new RegExp(String.raw`["']${key}["']\s*:\s*(?:"([^"]+)"|'([^']+)'|\[([^\]]+)\]|([^\s,}]+))`, "gi"),
+    ];
+
+    for (const pattern of patterns) {
+      for (const match of block.matchAll(pattern)) {
+        const raw = match[1] ?? match[2] ?? match[3] ?? match[4] ?? "";
+        if (!raw) continue;
+
+        if (raw.includes("[")) {
+          values.push(...extractLiteralList(raw));
+          continue;
+        }
+
+        values.push(raw.trim());
+      }
+    }
+
+    return values.filter(Boolean);
+  }
 
   for (const resourceType of policyResourceTypes) {
     const blocks = getResourceBlocks(terraformText, resourceType);
     for (const block of blocks) {
       sawPolicyBlock = true;
-      policyExamples.push(block);
 
-      const actionMatches =
-        /(?:Action|actions)\s*=\s*["']([^"']+)["']|["']Action["']\s*:\s*["']([^"']+)["']|["']action["']\s*:\s*["']([^"']+)["']/gi;
-      const resourceMatches =
-        /(?:Resource|resources)\s*=\s*["']([^"']+)["']|["']Resource["']\s*:\s*["']([^"']+)["']|["']resource["']\s*:\s*["']([^"']+)["']/gi;
+      const actionValues = extractPolicyValues(block, "Action");
+      const resourceValues = extractPolicyValues(block, "Resource");
 
-      const actionText = block.match(actionMatches)?.join(" ") ?? "";
-      const resourceText = block.match(resourceMatches)?.join(" ") ?? "";
-
-      if (/(?:\*|iam:\*)/i.test(actionText)) {
-        wildcardAction = true;
+      if (actionValues.some((value) => value === "*")) {
+        hasWildcardAction = true;
       }
-      if (/(?:\*|\[\s*"\*"\s*\]|\[\s*\*\s*\])/.test(actionText)) {
-        wildcardAction = true;
+      if (actionValues.some((value) => /:\*$/.test(value))) {
+        hasBroadAction = true;
       }
-      if (/(?:\*|\[\s*"\*"\s*\]|\[\s*\*\s*\])/.test(resourceText)) {
-        wildcardResource = true;
-      }
-      if (/iam:\*/i.test(actionText)) {
-        broadAction = true;
+      if (resourceValues.some((value) => value === "*")) {
+        hasWildcardResource = true;
       }
     }
   }
@@ -225,7 +306,7 @@ function analyzeIamPolicy(terraformText: string): Finding[] {
     return findings;
   }
 
-  if (wildcardAction && wildcardResource) {
+  if (hasWildcardAction && hasWildcardResource) {
     findings.push({
       title: "IAM policy grants wildcard action and wildcard resource",
       severity: "CRITICAL",
@@ -238,13 +319,13 @@ function analyzeIamPolicy(terraformText: string): Finding[] {
     return findings;
   }
 
-  if (wildcardAction || wildcardResource || broadAction) {
+  if (hasWildcardAction || hasWildcardResource || hasBroadAction) {
     findings.push({
       title: "IAM policy contains broad wildcard permissions",
       severity: "WARNING",
       category: "Security",
       description:
-        "The supplied Terraform includes wildcard IAM actions or resources, or a broad iam:* pattern. This is not automatically malicious, but it warrants review and least-privilege tightening.",
+        "The supplied Terraform includes wildcard IAM actions or resources, or a broad service-wide action pattern such as s3:* or iam:*.",
       recommendation:
         "Review the policy for least-privilege access and replace wildcard entries with more specific actions or resource scopes where possible.",
     });
@@ -520,6 +601,456 @@ function analyzeRds(terraformText: string): Finding[] {
   return findings;
 }
 
+function analyzeProviderVersionPinning(terraformText: string): Finding[] {
+  const findings: Finding[] = [];
+  const providerBlocks = terraformText.match(/provider\s+"[^"]+"\s*\{[\s\S]*?\}/gim) || [];
+
+  if (providerBlocks.length === 0) {
+    return findings;
+  }
+
+  for (const block of providerBlocks) {
+    const hasVersionConstraint = /version\s*=\s*["'][^"']+["']/i.test(block);
+    const hasBroadConstraint = /version\s*=\s*["']\s*(?:>=\s*0|>=\s*1|~>\s*0|~>\s*1|\*|\s*"\s*")/i.test(block);
+
+    if (!hasVersionConstraint || hasBroadConstraint) {
+      findings.push({
+        title: "Provider version pinning is missing or too broad",
+        severity: "WARNING",
+        category: "Governance",
+        description:
+          "The supplied Terraform contains a provider block without a clear version pin or with an unbounded version constraint. This can make infrastructure less reproducible across environments.",
+        recommendation:
+          "Pin provider versions to improve reproducibility and reduce unexpected upgrades.",
+      });
+    } else {
+      findings.push({
+        title: "Provider version constraints are present",
+        severity: "PASS",
+        category: "Governance",
+        description:
+          "Terraform provider versions appear to be constrained or pinned.",
+      });
+    }
+  }
+
+  return findings;
+}
+
+function analyzeModuleVersionPinning(terraformText: string): Finding[] {
+  const findings: Finding[] = [];
+  const moduleBlocks = terraformText.match(/module\s+"[^"]+"\s*\{[\s\S]*?\}/gim) || [];
+
+  for (const block of moduleBlocks) {
+    const sourceMatch = block.match(/source\s*=\s*["']([^"']+)["']/i);
+    const source = sourceMatch ? sourceMatch[1] : "";
+    const isLocalModule =
+      source.startsWith("./") ||
+      source.startsWith("../") ||
+      source.startsWith("git::") ||
+      source.startsWith("github.com") ||
+      source.startsWith("bitbucket.org") ||
+      source.startsWith("git@") ||
+      source.startsWith("file:");
+
+    if (isLocalModule) {
+      continue;
+    }
+
+    const versionConstraint = /version\s*=\s*["'][^"']+["']/i.test(block);
+    const hasBroadConstraint = /version\s*=\s*["']\s*(?:>=\s*0|>=\s*1|~>\s*0|~>\s*1|\*|\s*"\s*)/i.test(block);
+
+    if (!versionConstraint || hasBroadConstraint) {
+      findings.push({
+        title: `Module version pinning is missing or too broad: ${source || "module"}`,
+        severity: "WARNING",
+        category: "Governance",
+        description:
+          "The supplied Terraform contains a registry module without a clear version pin or with a broad version constraint. This can lead to unexpected module updates.",
+        recommendation:
+          "Pin registry modules to a known version to improve reproducibility and reviewability.",
+      });
+    }
+  }
+
+  return findings;
+}
+
+function analyzeResourceTagging(terraformText: string): Finding[] {
+  const findings: Finding[] = [];
+  const taggableResources = [
+    "aws_instance",
+    "aws_db_instance",
+    "aws_s3_bucket",
+    "aws_security_group",
+    "aws_vpc",
+    "aws_eks_cluster",
+    "aws_lambda_function",
+    "aws_ebs_volume",
+    "aws_lb",
+    "aws_alb",
+    "aws_elb",
+    "aws_iam_role",
+  ];
+
+  const missingTags: string[] = [];
+
+  for (const resourceType of taggableResources) {
+    const blocks = getResourceBlocks(terraformText, resourceType);
+    if (blocks.length === 0) {
+      continue;
+    }
+
+    let foundMeaningfulTags = false;
+
+    for (const block of blocks) {
+      const tagBlockMatch = block.match(/tags\s*=\s*\{([\s\S]*?)\}/i);
+      const tagBlock = tagBlockMatch ? tagBlockMatch[1] : "";
+      const hasMeaningfulTags = /(?:[A-Za-z0-9_-]+\s*=\s*(?:\"[^\"]+\"|'[^']+'|[A-Za-z0-9_./:-]+))/.test(tagBlock);
+
+      if (hasMeaningfulTags) {
+        foundMeaningfulTags = true;
+      }
+    }
+
+    if (!foundMeaningfulTags) {
+      missingTags.push(resourceType);
+    }
+  }
+
+  if (missingTags.length > 0) {
+    findings.push({
+      title: "AWS resources appear to be missing tags",
+      severity: "WARNING",
+      category: "Governance",
+      description:
+        "The supplied Terraform contains AWS resources that commonly support tags but do not appear to define them. This does not prove every resource is untagged in every environment, but it is an important governance gap to review.",
+      recommendation:
+        "Add consistent ownership, environment, application, and cost-allocation tags where appropriate.",
+    });
+  } else {
+    findings.push({
+      title: "Resource tagging appears present",
+      severity: "PASS",
+      category: "Governance",
+      description:
+        "Tagged AWS resources were detected in the configuration.",
+    });
+  }
+
+  return findings;
+}
+
+function analyzeTerraformBackend(terraformText: string): Finding[] {
+  const findings: Finding[] = [];
+  const backendBlocks = terraformText.match(/terraform\s*\{[\s\S]*?backend\s+"[^"]+"\s*\{[\s\S]*?\}/gim) || [];
+
+  if (backendBlocks.length > 0) {
+    const backendText = backendBlocks.join("\n");
+    if (/backend\s+"local"/i.test(backendText)) {
+      findings.push({
+        title: "Local Terraform backend is explicitly configured",
+        severity: "WARNING",
+        category: "Governance",
+        description:
+          "The supplied Terraform explicitly configures a local backend. This can be appropriate for local development, but it is not generally the preferred pattern for team or production use.",
+        recommendation:
+          "Use a remote backend for shared or production workflows when multiple engineers or environments depend on the same state.",
+      });
+      return findings;
+    }
+
+    findings.push({
+      title: "Remote backend configured",
+      severity: "PASS",
+      category: "Governance",
+      description:
+        "A remote backend block was detected, which is better for team collaboration and state management.",
+    });
+    return findings;
+  }
+
+  findings.push({
+    title: "Remote backend cannot be confirmed from the supplied Terraform",
+    severity: "WARNING",
+    category: "Governance",
+    description:
+      "Unable to verify a remote backend from the supplied Terraform.",
+    recommendation:
+      "Review the Terraform state strategy and consider a remote backend for shared or production usage.",
+  });
+
+  return findings;
+}
+
+function analyzeBackups(terraformText: string): Finding[] {
+  const findings: Finding[] = [];
+  const dbBlocks = getResourceBlocks(terraformText, "aws_db_instance");
+
+  if (dbBlocks.length === 0) {
+    return findings;
+  }
+
+  for (const block of dbBlocks) {
+    if (/backup_retention_period\s*=\s*0/i.test(block)) {
+      findings.push({
+        title: "RDS backup retention is explicitly disabled",
+        severity: "WARNING",
+        category: "Reliability",
+        description:
+          "The supplied Terraform sets backup_retention_period = 0 for an RDS instance, which removes the default backup protection for recovery scenarios.",
+        recommendation:
+          "Set a non-zero backup_retention_period that matches your recovery objectives.",
+      });
+    } else if (!/backup_retention_period\s*=/.test(block)) {
+      findings.push({
+        title: "RDS backup retention cannot be confirmed from the supplied Terraform",
+        severity: "WARNING",
+        category: "Reliability",
+        description:
+          "Unable to fully verify backup retention from the supplied Terraform.",
+        recommendation:
+          "Review the RDS backup strategy and configure an appropriate backup_retention_period for production or shared workloads.",
+      });
+    }
+  }
+
+  return findings;
+}
+
+function analyzeDeletionProtection(terraformText: string): Finding[] {
+  const findings: Finding[] = [];
+  const dbBlocks = getResourceBlocks(terraformText, "aws_db_instance");
+
+  if (dbBlocks.length === 0) {
+    return findings;
+  }
+
+  for (const block of dbBlocks) {
+    if (/deletion_protection\s*=\s*true/i.test(block)) {
+      findings.push({
+        title: "RDS deletion protection is enabled",
+        severity: "PASS",
+        category: "Reliability",
+        description:
+          "The supplied Terraform explicitly enables deletion protection for the RDS instance.",
+      });
+      continue;
+    }
+
+    if (/deletion_protection\s*=\s*false/i.test(block)) {
+      findings.push({
+        title: "RDS deletion protection is explicitly disabled",
+        severity: "WARNING",
+        category: "Reliability",
+        description:
+          "The supplied Terraform explicitly disables deletion protection for an RDS instance. This can increase the risk of accidental data loss during destructive operations.",
+        recommendation:
+          "Set deletion_protection = true for production or long-lived databases unless a deliberate exception is required.",
+      });
+      continue;
+    }
+
+    const isProductionLike = /environment\s*=\s*["'](?:prod|production|prod\b|production\b)["']|tags\s*=\s*\{[\s\S]*Environment\s*=\s*["'](?:prod|production)["']|identifier\s*=\s*["'][^"\n]*(?:prod|production)[^"\n]*["']/i.test(block);
+    if (isProductionLike) {
+      findings.push({
+        title: "RDS deletion protection is not explicitly set",
+        severity: "WARNING",
+        category: "Reliability",
+        description:
+          "Unable to fully verify deletion protection from the supplied Terraform.",
+        recommendation:
+          "Consider enabling deletion_protection for production databases where accidental destruction would be disruptive.",
+      });
+    }
+  }
+
+  return findings;
+}
+
+function analyzeLifecycleProtection(terraformText: string): Finding[] {
+  const findings: Finding[] = [];
+  const productionLikeResources = [
+    "aws_db_instance",
+    "aws_eks_cluster",
+    "aws_rds_cluster",
+    "aws_s3_bucket",
+  ];
+
+  for (const resourceType of productionLikeResources) {
+    const blocks = getResourceBlocks(terraformText, resourceType);
+    for (const block of blocks) {
+      if (/lifecycle\s*\{[\s\S]*?prevent_destroy\s*=\s*true/i.test(block)) {
+        findings.push({
+          title: `Lifecycle protection is configured for ${resourceType}`,
+          severity: "PASS",
+          category: "Reliability",
+          description:
+            "The supplied Terraform explicitly configures prevent_destroy = true for a critical resource.",
+        });
+        continue;
+      }
+
+      if (/lifecycle\s*\{[\s\S]*?prevent_destroy\s*=\s*false/i.test(block)) {
+        findings.push({
+          title: `${resourceType} explicitly disables lifecycle protection`,
+          severity: "WARNING",
+          category: "Reliability",
+          description:
+            "The supplied Terraform explicitly disables prevent_destroy for a critical resource. This may be intentionally safe for lower-risk workloads, but it removes a common protection against accidental destruction.",
+          recommendation:
+            "Set prevent_destroy = true for production-critical resources where accidental replacement or deletion would be disruptive.",
+        });
+        continue;
+      }
+
+      const isProductionLike = /environment\s*=\s*["'](?:prod|production|stage|staging)["']|tags\s*=\s*\{[\s\S]*Environment\s*=\s*["'](?:prod|production|stage|staging)["']|identifier\s*=\s*["'][^"\n]*(?:prod|production|stage|staging)[^"\n]*["']/i.test(block);
+      if (isProductionLike) {
+        findings.push({
+          title: `${resourceType} does not appear to enforce lifecycle protection`,
+          severity: "WARNING",
+          category: "Reliability",
+          description:
+            "Unable to fully verify lifecycle protection from the supplied Terraform.",
+          recommendation:
+            "Consider using lifecycle rules and prevent_destroy for production-critical resources where accidental deletion would be disruptive.",
+        });
+      }
+    }
+  }
+
+  return findings;
+}
+
+function analyzeHighAvailability(terraformText: string): Finding[] {
+  const findings: Finding[] = [];
+  const dbBlocks = getResourceBlocks(terraformText, "aws_db_instance");
+
+  for (const block of dbBlocks) {
+    if (/multi_az\s*=\s*true/i.test(block)) {
+      findings.push({
+        title: "Database is configured for multi-AZ resilience",
+        severity: "PASS",
+        category: "Reliability",
+        description:
+          "The supplied Terraform explicitly enables multi-AZ configuration for the database.",
+      });
+      continue;
+    }
+
+    if (/availability_zone\s*=\s*"[^"]+"/i.test(block) || /multi_az\s*=\s*false/i.test(block)) {
+      findings.push({
+        title: "Database is pinned to a single availability zone",
+        severity: "WARNING",
+        category: "Reliability",
+        description:
+          "The supplied Terraform explicitly configures the database in a single availability zone or disables multi-AZ redundancy.",
+        recommendation:
+          "Review whether the database should use multi-AZ configuration for production resiliency and recovery scenarios.",
+      });
+    }
+  }
+
+  return findings;
+}
+
+function analyzeLogging(terraformText: string): Finding[] {
+  const findings: Finding[] = [];
+
+  if (/aws_db_instance[\s\S]*?enabled_cloudwatch_logs_exports/i.test(terraformText)) {
+    findings.push({
+      title: "RDS log exports are configured",
+      severity: "PASS",
+      category: "Reliability",
+      description:
+        "The supplied Terraform explicitly configures RDS CloudWatch log exports.",
+    });
+  } else if (/aws_db_instance/.test(terraformText)) {
+    findings.push({
+      title: "RDS log exports are not clearly configured",
+      severity: "WARNING",
+      category: "Reliability",
+      description:
+        "Unable to fully verify database logging from the supplied Terraform.",
+      recommendation:
+        "Review whether RDS log exports should be enabled for operational visibility and troubleshooting.",
+    });
+  }
+
+  const s3Buckets = getResourceBlocks(terraformText, "aws_s3_bucket");
+  for (const block of s3Buckets) {
+    if (/logging\s*\{[\s\S]*?target_bucket/i.test(block)) {
+      findings.push({
+        title: "S3 access logging is configured",
+        severity: "PASS",
+        category: "Reliability",
+        description:
+          "The supplied Terraform includes an S3 logging configuration for access auditing.",
+      });
+    } else if (/bucket\s*=\s*["'][^"']+["']/i.test(block)) {
+      findings.push({
+        title: "S3 access logging is not clearly configured",
+        severity: "WARNING",
+        category: "Reliability",
+        description:
+          "Unable to fully verify S3 access logging from the supplied Terraform.",
+        recommendation:
+          "Consider enabling S3 access logging for buckets handling operational or audit-sensitive data.",
+      });
+    }
+  }
+
+  if (/aws_lb|aws_alb|aws_elb/.test(terraformText) && !/access_logs\s*\{[\s\S]*?enabled\s*=\s*true/i.test(terraformText)) {
+    findings.push({
+      title: "Load balancer access logs are not clearly configured",
+      severity: "WARNING",
+      category: "Reliability",
+      description:
+        "Unable to fully verify load balancer access logging from the supplied Terraform.",
+      recommendation:
+        "Enable access logs where the workload depends on a public or application-facing load balancer.",
+    });
+  }
+
+  return findings;
+}
+
+function analyzeMonitoring(terraformText: string): Finding[] {
+  const findings: Finding[] = [];
+
+  if (/aws_db_instance[\s\S]*?monitoring_interval|monitoring_role_arn/i.test(terraformText)) {
+    findings.push({
+      title: "RDS monitoring is configured",
+      severity: "PASS",
+      category: "Reliability",
+      description:
+        "The supplied Terraform explicitly configures RDS monitoring-related settings.",
+    });
+  } else if (/aws_db_instance/.test(terraformText)) {
+    findings.push({
+      title: "RDS monitoring cannot be confirmed from the supplied Terraform",
+      severity: "WARNING",
+      category: "Reliability",
+      description:
+        "Unable to fully verify monitoring from the supplied Terraform.",
+      recommendation:
+        "Review whether CloudWatch monitoring should be enabled for the database workload.",
+    });
+  }
+
+  if (/aws_cloudwatch_metric_alarm|aws_cloudwatch_dashboard|aws_cloudwatch_log_group/.test(terraformText)) {
+    findings.push({
+      title: "CloudWatch monitoring resources are configured",
+      severity: "PASS",
+      category: "Reliability",
+      description:
+        "The supplied Terraform includes CloudWatch monitoring resources directly.",
+    });
+  }
+
+  return findings;
+}
+
 function analyzeSensitiveVariables(terraformText: string): Finding[] {
   const findings: Finding[] = [];
   const variableBlocks = terraformText.match(/variable\s+"[^"]+"\s*\{[\s\S]*?\}/gim) || [];
@@ -589,6 +1120,74 @@ function analyzeSensitiveVariables(terraformText: string): Finding[] {
   return findings;
 }
 
+function hasObviousTerraformSyntaxIssue(terraformText: string): boolean {
+  const sanitized = terraformText
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/#.*$/gm, "")
+    .replace(/\/\/.*$/gm, "");
+
+  let braceDepth = 0;
+  let parenDepth = 0;
+  let bracketDepth = 0;
+  let inSingleQuote = false;
+  let inDoubleQuote = false;
+  let escaped = false;
+
+  for (let index = 0; index < sanitized.length; index += 1) {
+    const char = sanitized[index];
+
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+
+    if (char === "\\") {
+      escaped = true;
+      continue;
+    }
+
+    if (char === "'" && !inDoubleQuote) {
+      inSingleQuote = !inSingleQuote;
+      continue;
+    }
+
+    if (char === '"' && !inSingleQuote) {
+      inDoubleQuote = !inDoubleQuote;
+      continue;
+    }
+
+    if (inSingleQuote || inDoubleQuote) {
+      continue;
+    }
+
+    if (char === "{") braceDepth += 1;
+    if (char === "}") braceDepth -= 1;
+    if (char === "(") parenDepth += 1;
+    if (char === ")") parenDepth -= 1;
+    if (char === "[") bracketDepth += 1;
+    if (char === "]") bracketDepth -= 1;
+
+    if ([braceDepth, parenDepth, bracketDepth].some((depth) => depth < 0)) {
+      return true;
+    }
+  }
+
+  if (braceDepth !== 0 || parenDepth !== 0 || bracketDepth !== 0) {
+    return true;
+  }
+
+  const likelyUnclosedBlock =
+    /(?:resource|module|variable|provider|data|locals|terraform|output)\s+["'][^"']+["']\s*\{[\s\S]*$/i.test(
+      sanitized,
+    ) && !/\}\s*$/.test(sanitized);
+
+  if (likelyUnclosedBlock) {
+    return true;
+  }
+
+  return false;
+}
+
 function analyzeTerraform(terraformText: string): Finding[] {
   const findings: Finding[] = [];
   const normalized = terraformText.trim();
@@ -601,6 +1200,19 @@ function analyzeTerraform(terraformText: string): Finding[] {
       description: "No Terraform configuration was provided.",
       recommendation:
         "Paste a Terraform file or module definition before running the analyzer.",
+    });
+    return findings;
+  }
+
+  if (hasObviousTerraformSyntaxIssue(terraformText)) {
+    findings.push({
+      title: "Terraform syntax appears incomplete",
+      severity: "WARNING",
+      category: "Governance",
+      description:
+        "The supplied Terraform appears to be incomplete or malformed. Unable to fully verify this configuration from the supplied text.",
+      recommendation:
+        "Check the Terraform configuration for missing braces, quotes, or closing blocks before re-running the analyzer.",
     });
     return findings;
   }
@@ -804,24 +1416,15 @@ function analyzeTerraform(terraformText: string): Finding[] {
     });
   }
 
-  const environmentSpecificValues = [
-    /\bregion\s*=\s*["'](?:us-east-1|us-west-2|eu-west-1|ap-southeast-1)["']/gi,
-    /\bami\s*=\s*["']ami-[A-Za-z0-9]+["']/gi,
-    /\benvironment\s*=\s*["'](?:prod|production|dev|staging)["']/gi,
-    /\baccount_id\s*=\s*["']\d+["']/gi,
-  ];
+  const environmentSpecificDeclarations = terraformText.match(/(?:variable|locals)\s+"[^"]+"\s*\{[\s\S]*?(?:default|value)\s*=\s*["'](?:prod|production|staging|stage|dev|development|test|qa|uat)["']/gim) || [];
 
-  const hardcodedEnvironmentMatches = environmentSpecificValues.filter((pattern) =>
-    pattern.test(terraformText),
-  ).length;
-
-  if (hardcodedEnvironmentMatches > 0) {
+  if (environmentSpecificDeclarations.length > 0) {
     findings.push({
       title: "Hardcoded environment-specific values",
       severity: "WARNING",
       category: "Governance",
       description:
-        "The Terraform config contains environment-specific configuration values that are often better handled by variables or separate environment tiers.",
+        "The Terraform config contains explicit environment-specific defaults that may be better handled with variables or environment tiers.",
       recommendation:
         "Prefer variables or tfvars files for region, environment, and account-specific values to reduce duplication and environment drift.",
     });
@@ -836,29 +1439,7 @@ function analyzeTerraform(terraformText: string): Finding[] {
   }
 
   const hasProviderBlock = /provider\s+"[^"]+"\s*\{/.test(terraformText);
-  const hasRequiredProviders = /required_providers\s*\{/.test(terraformText);
-  const versionUsagePattern = /version\s*=\s*["'].*["']/g;
-  const versionPins = terraformText.match(versionUsagePattern) || [];
-
-  if (hasRequiredProviders || versionPins.length > 0) {
-    findings.push({
-      title: "Provider version constraints are present",
-      severity: "PASS",
-      category: "Governance",
-      description:
-        "Terraform provider versions appear to be constrained or pinned.",
-    });
-  } else if (hasProviderBlock) {
-    findings.push({
-      title: "Provider version pinning missing",
-      severity: "WARNING",
-      category: "Governance",
-      description:
-        "The provider block exists, but no obvious version constraint is configured.",
-      recommendation:
-        "Add a version constraint using required_providers or provider version settings to reduce surprise upgrades.",
-    });
-  } else {
+  if (!hasProviderBlock) {
     findings.push({
       title: "Provider configuration not detected",
       severity: "WARNING",
@@ -867,73 +1448,6 @@ function analyzeTerraform(terraformText: string): Finding[] {
         "No provider block was found. This may be acceptable in modules, but it is worth confirming provider intent.",
       recommendation:
         "Define provider requirements explicitly where the module is meant to target a cloud platform.",
-    });
-  }
-
-  const awsResourceTypes = [
-    "aws_instance",
-    "aws_db_instance",
-    "aws_s3_bucket",
-    "aws_security_group",
-    "aws_vpc",
-    "aws_eks_cluster",
-    "aws_lambda_function",
-    "aws_ecs_cluster",
-  ];
-
-  const tagsIssues: string[] = [];
-  for (const resourceType of awsResourceTypes) {
-    const resourceRegex = new RegExp(
-      `resource\\s+"${resourceType}"\\s+"[^"]+"\\s*\\{([\\s\\S]*?)\\n\\s*\\}`,
-      "gim",
-    );
-    const blocks = terraformText.match(resourceRegex) || [];
-    for (const block of blocks) {
-      const hasTags = /tags\s*\s*\{/.test(block) || /tags\s*=\s*\{/.test(block);
-      if (!hasTags) {
-        tagsIssues.push(resourceType);
-      }
-    }
-  }
-
-  if (tagsIssues.length > 0) {
-    findings.push({
-      title: "AWS resource tagging is inconsistent",
-      severity: "WARNING",
-      category: "Governance",
-      description:
-        "Some AWS resources do not appear to define tags, which is often expected for ownership, cost, and governance.",
-      recommendation:
-        "Add common tags such as Name, Environment, Owner, and CostCenter to critical infrastructure resources.",
-    });
-  } else {
-    findings.push({
-      title: "Resource tagging appears present",
-      severity: "PASS",
-      category: "Governance",
-      description:
-        "Tagged AWS resources were detected in the configuration.",
-    });
-  }
-
-  const backendPattern = /terraform\s*\{[\s\S]*?backend\s+"[^"]+"\s*\{/im;
-  if (backendPattern.test(terraformText)) {
-    findings.push({
-      title: "Remote backend configured",
-      severity: "PASS",
-      category: "Governance",
-      description:
-        "A remote backend block was detected, which is better for team collaboration and state management.",
-    });
-  } else {
-    findings.push({
-      title: "No remote backend configured",
-      severity: "WARNING",
-      category: "Governance",
-      description:
-        "No backend block was found. Local state may be unsuitable for shared or production environments.",
-      recommendation:
-        "Configure a remote backend such as S3, Terraform Cloud, or Azure Storage to improve collaboration and state safety.",
     });
   }
 
@@ -961,6 +1475,16 @@ function analyzeTerraform(terraformText: string): Finding[] {
   findings.push(...analyzeSecurityGroups(terraformText));
   findings.push(...analyzeS3Buckets(terraformText));
   findings.push(...analyzeRds(terraformText));
+  findings.push(...analyzeProviderVersionPinning(terraformText));
+  findings.push(...analyzeModuleVersionPinning(terraformText));
+  findings.push(...analyzeResourceTagging(terraformText));
+  findings.push(...analyzeTerraformBackend(terraformText));
+  findings.push(...analyzeBackups(terraformText));
+  findings.push(...analyzeDeletionProtection(terraformText));
+  findings.push(...analyzeLifecycleProtection(terraformText));
+  findings.push(...analyzeHighAvailability(terraformText));
+  findings.push(...analyzeLogging(terraformText));
+  findings.push(...analyzeMonitoring(terraformText));
   findings.push(...analyzeSensitiveVariables(terraformText));
 
   return findings;

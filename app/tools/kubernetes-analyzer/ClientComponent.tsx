@@ -42,6 +42,31 @@ spec:
           ports:
             - containerPort: 80`;
 
+function getEffectiveSecurityContext(container: any, podSpec: any) {
+  return {
+    ...(podSpec?.securityContext || {}),
+    ...(container?.securityContext || {}),
+  };
+}
+
+function getHighRiskCapabilities() {
+  return new Set([
+    "ALL",
+    "SYS_ADMIN",
+    "NET_ADMIN",
+    "SYS_PTRACE",
+    "SYS_MODULE",
+    "DAC_READ_SEARCH",
+    "DAC_OVERRIDE",
+    "SETPCAP",
+    "AUDIT_CONTROL",
+    "AUDIT_WRITE",
+    "SYS_TIME",
+    "SYS_RAW_IO",
+    "NET_RAW",
+  ]);
+}
+
 function analyzeDeployment(document: any): Check[] {
   const checks: Check[] = [];
 
@@ -81,6 +106,75 @@ function analyzeDeployment(document: any): Check[] {
         "The Deployment does not explicitly define a namespace.",
       recommendation:
         "Specify the target namespace when managing production workloads.",
+    });
+  }
+
+  if (podSpec?.hostNetwork === true) {
+    checks.push({
+      title: "hostNetwork",
+      severity: "critical",
+      description: "The pod is configured with hostNetwork: true.",
+      recommendation:
+        "Disable hostNetwork unless the workload explicitly requires host networking.",
+    });
+  } else {
+    checks.push({
+      title: "hostNetwork",
+      severity: "pass",
+      description: "The pod is not configured to use the host network.",
+    });
+  }
+
+  if (podSpec?.hostPID === true) {
+    checks.push({
+      title: "hostPID",
+      severity: "critical",
+      description: "The pod is configured with hostPID: true.",
+      recommendation:
+        "Disable hostPID unless the workload explicitly requires access to the host process namespace.",
+    });
+  } else {
+    checks.push({
+      title: "hostPID",
+      severity: "pass",
+      description: "The pod is not configured to share the host process namespace.",
+    });
+  }
+
+  if (podSpec?.hostIPC === true) {
+    checks.push({
+      title: "hostIPC",
+      severity: "warning",
+      description: "The pod is configured with hostIPC: true.",
+      recommendation:
+        "Disable hostIPC unless the workload explicitly requires the host IPC namespace.",
+    });
+  } else {
+    checks.push({
+      title: "hostIPC",
+      severity: "pass",
+      description: "The pod is not configured to share the host IPC namespace.",
+    });
+  }
+
+  if (podSpec?.volumes?.some((volume: any) => volume?.hostPath)) {
+    const hostPathVolumes = podSpec.volumes.filter((volume: any) => volume?.hostPath);
+    const hostPathDetail = hostPathVolumes
+      .map((volume: any) => `${volume.name || "unnamed"}: ${volume.hostPath.path || "unknown path"}`)
+      .join(", ");
+
+    checks.push({
+      title: "hostPath volumes",
+      severity: "critical",
+      description: `The pod mounts hostPath volumes: ${hostPathDetail}.`,
+      recommendation:
+        "Avoid hostPath where possible; use a Kubernetes-managed volume such as emptyDir, PVC, or another appropriate storage mechanism.",
+    });
+  } else {
+    checks.push({
+      title: "hostPath volumes",
+      severity: "pass",
+      description: "The pod does not mount hostPath volumes.",
     });
   }
 
@@ -154,9 +248,7 @@ function analyzeDeployment(document: any): Check[] {
       });
     }
 
-    const securityContext =
-      container?.securityContext ||
-      podSpec?.securityContext;
+    const securityContext = getEffectiveSecurityContext(container, podSpec);
 
     if (securityContext?.runAsNonRoot === true) {
       checks.push({
@@ -176,6 +268,40 @@ function analyzeDeployment(document: any): Check[] {
       });
     }
 
+    if (typeof securityContext?.runAsUser === "number") {
+      if (securityContext.runAsUser === 0) {
+        const rootSeverity =
+          securityContext?.privileged === true ||
+          securityContext?.allowPrivilegeEscalation === true
+            ? "critical"
+            : "warning";
+
+        checks.push({
+          title: `${containerName}: runAsUser`,
+          severity: rootSeverity,
+          description:
+            "The container is explicitly configured to run as UID 0.",
+          recommendation:
+            "Set a non-root user ID unless the workload explicitly requires root privileges.",
+        });
+      } else {
+        checks.push({
+          title: `${containerName}: runAsUser`,
+          severity: "pass",
+          description: `The container is explicitly configured to run as UID ${securityContext.runAsUser}.`,
+        });
+      }
+    } else {
+      checks.push({
+        title: `${containerName}: runAsUser`,
+        severity: "warning",
+        description:
+          "The container does not explicitly define a user ID.",
+        recommendation:
+          "Set securityContext.runAsUser to a non-root UID when possible.",
+      });
+    }
+
     if (securityContext?.privileged === true) {
       checks.push({
         title: `${containerName}: privileged container`,
@@ -191,6 +317,171 @@ function analyzeDeployment(document: any): Check[] {
         severity: "pass",
         description:
           "The container is not explicitly configured as privileged.",
+      });
+    }
+
+    if (securityContext?.allowPrivilegeEscalation === true) {
+      checks.push({
+        title: `${containerName}: allowPrivilegeEscalation`,
+        severity: "critical",
+        description:
+          "The container explicitly sets allowPrivilegeEscalation: true.",
+        recommendation:
+          "Set securityContext.allowPrivilegeEscalation: false unless the workload explicitly requires privilege escalation.",
+      });
+    } else if (securityContext?.allowPrivilegeEscalation === false) {
+      checks.push({
+        title: `${containerName}: allowPrivilegeEscalation`,
+        severity: "pass",
+        description:
+          "The container explicitly disables privilege escalation.",
+      });
+    } else {
+      checks.push({
+        title: `${containerName}: allowPrivilegeEscalation`,
+        severity: "warning",
+        description:
+          "The container does not explicitly define allowPrivilegeEscalation.",
+        recommendation:
+          "Set securityContext.allowPrivilegeEscalation: false unless the workload explicitly requires privilege escalation.",
+      });
+    }
+
+    const capabilities = securityContext?.capabilities || {};
+    const addedCapabilities = Array.isArray(capabilities.add)
+      ? capabilities.add
+          .map((cap: any) => String(cap).trim())
+          .filter(Boolean)
+      : [];
+    const droppedCapabilities = Array.isArray(capabilities.drop)
+      ? capabilities.drop
+          .map((cap: any) => String(cap).trim())
+          .filter(Boolean)
+      : [];
+
+    if (addedCapabilities.length > 0) {
+      const dangerousCaps = addedCapabilities.filter((cap: string) =>
+        getHighRiskCapabilities().has(cap.toUpperCase())
+      );
+
+      checks.push({
+        title: `${containerName}: capabilities.add`,
+        severity: dangerousCaps.length > 0 ? "critical" : "warning",
+        description: `The container adds Linux capabilities: ${addedCapabilities.join(", ")}.`,
+        recommendation:
+          "Consider dropping all Linux capabilities and adding back only the capabilities required by the application.",
+      });
+    } else {
+      checks.push({
+        title: `${containerName}: capabilities.add`,
+        severity: "pass",
+        description: "The container does not add Linux capabilities.",
+      });
+    }
+
+    if (droppedCapabilities.includes("ALL") || droppedCapabilities.includes("all")) {
+      checks.push({
+        title: `${containerName}: capabilities.drop`,
+        severity: "pass",
+        description: "The container drops all Linux capabilities.",
+      });
+    } else {
+      checks.push({
+        title: `${containerName}: capabilities.drop`,
+        severity: "warning",
+        description:
+          "The container does not explicitly drop all Linux capabilities.",
+        recommendation:
+          "Consider dropping all Linux capabilities and adding back only the capabilities required by the application.",
+      });
+    }
+
+    if (securityContext?.readOnlyRootFilesystem === true) {
+      checks.push({
+        title: `${containerName}: readOnlyRootFilesystem`,
+        severity: "pass",
+        description: "The container root filesystem is read-only.",
+      });
+    } else {
+      checks.push({
+        title: `${containerName}: readOnlyRootFilesystem`,
+        severity: "warning",
+        description: "The container root filesystem is writable.",
+        recommendation:
+          "Set securityContext.readOnlyRootFilesystem: true where the application supports a read-only root filesystem.",
+      });
+    }
+
+    const seccompType = securityContext?.seccompProfile?.type;
+    if (seccompType === "RuntimeDefault" || seccompType === "Localhost") {
+      checks.push({
+        title: `${containerName}: seccompProfile`,
+        severity: "pass",
+        description: `The container explicitly configures seccompProfile.type as "${seccompType}".`,
+      });
+    } else {
+      checks.push({
+        title: `${containerName}: seccompProfile`,
+        severity: "warning",
+        description:
+          "The container does not explicitly configure a seccomp profile.",
+        recommendation:
+          "Set seccompProfile.type to RuntimeDefault or an approved profile.",
+      });
+    }
+
+    const hostPortValues = (container?.ports || [])
+      .filter((port: any) => typeof port?.hostPort === "number")
+      .map((port: any) => `${port.containerPort || "unknown"}:${port.hostPort}`);
+
+    if (hostPortValues.length > 0) {
+      checks.push({
+        title: `${containerName}: hostPort`,
+        severity: "warning",
+        description: `The container is bound to host ports: ${hostPortValues.join(", ")}.`,
+        recommendation:
+          "Prefer a Kubernetes Service instead of hostPort unless node-level port binding is explicitly required.",
+      });
+    } else {
+      checks.push({
+        title: `${containerName}: hostPort`,
+        severity: "pass",
+        description: "The container does not bind to host ports.",
+      });
+    }
+
+    const imagePullPolicy = container?.imagePullPolicy;
+    if (typeof imagePullPolicy === "string") {
+      checks.push({
+        title: `${containerName}: imagePullPolicy`,
+        severity: "pass",
+        description: `The container explicitly sets imagePullPolicy to "${imagePullPolicy}".`,
+      });
+    } else {
+      checks.push({
+        title: `${containerName}: imagePullPolicy`,
+        severity: "warning",
+        description:
+          "The container does not explicitly set imagePullPolicy, which can create operational inconsistency.",
+        recommendation:
+          "Set imagePullPolicy explicitly to match your deployment policy and image lifecycle needs.",
+      });
+    }
+
+    if (container?.startupProbe) {
+      checks.push({
+        title: `${containerName}: startupProbe`,
+        severity: "pass",
+        description: "A startup probe is configured.",
+      });
+    } else {
+      checks.push({
+        title: `${containerName}: startupProbe`,
+        severity: "warning",
+        description:
+          "No startup probe is configured for this container.",
+        recommendation:
+          "Consider adding a startupProbe for slow-starting applications to prevent premature restarts.",
       });
     }
 
@@ -269,7 +560,6 @@ function getPodSpec(document: any): any | null {
 }
 
 function analyzeWorkload(document: any): Check[] {
-  // Reuse container-level checks from analyzeDeployment but avoid Deployment-specific checks
   const checks: Check[] = [];
 
   if (document?.metadata?.namespace) {
@@ -290,6 +580,75 @@ function analyzeWorkload(document: any): Check[] {
 
   const podSpec = getPodSpec(document);
   const containers = podSpec?.containers || [];
+
+  if (podSpec?.hostNetwork === true) {
+    checks.push({
+      title: "hostNetwork",
+      severity: "critical",
+      description: "The pod is configured with hostNetwork: true.",
+      recommendation:
+        "Disable hostNetwork unless the workload explicitly requires host networking.",
+    });
+  } else {
+    checks.push({
+      title: "hostNetwork",
+      severity: "pass",
+      description: "The pod is not configured to use the host network.",
+    });
+  }
+
+  if (podSpec?.hostPID === true) {
+    checks.push({
+      title: "hostPID",
+      severity: "critical",
+      description: "The pod is configured with hostPID: true.",
+      recommendation:
+        "Disable hostPID unless the workload explicitly requires access to the host process namespace.",
+    });
+  } else {
+    checks.push({
+      title: "hostPID",
+      severity: "pass",
+      description: "The pod is not configured to share the host process namespace.",
+    });
+  }
+
+  if (podSpec?.hostIPC === true) {
+    checks.push({
+      title: "hostIPC",
+      severity: "warning",
+      description: "The pod is configured with hostIPC: true.",
+      recommendation:
+        "Disable hostIPC unless the workload explicitly requires the host IPC namespace.",
+    });
+  } else {
+    checks.push({
+      title: "hostIPC",
+      severity: "pass",
+      description: "The pod is not configured to share the host IPC namespace.",
+    });
+  }
+
+  if (podSpec?.volumes?.some((volume: any) => volume?.hostPath)) {
+    const hostPathVolumes = podSpec.volumes.filter((volume: any) => volume?.hostPath);
+    const hostPathDetail = hostPathVolumes
+      .map((volume: any) => `${volume.name || "unnamed"}: ${volume.hostPath.path || "unknown path"}`)
+      .join(", ");
+
+    checks.push({
+      title: "hostPath volumes",
+      severity: "critical",
+      description: `The pod mounts hostPath volumes: ${hostPathDetail}.`,
+      recommendation:
+        "Avoid hostPath where possible; use a Kubernetes-managed volume such as emptyDir, PVC, or another appropriate storage mechanism.",
+    });
+  } else {
+    checks.push({
+      title: "hostPath volumes",
+      severity: "pass",
+      description: "The pod does not mount hostPath volumes.",
+    });
+  }
 
   if (!podSpec) {
     checks.push({
@@ -363,7 +722,7 @@ function analyzeWorkload(document: any): Check[] {
       });
     }
 
-    const securityContext = container?.securityContext || podSpec?.securityContext;
+    const securityContext = getEffectiveSecurityContext(container, podSpec);
 
     if (securityContext?.runAsNonRoot === true) {
       checks.push({
@@ -380,6 +739,36 @@ function analyzeWorkload(document: any): Check[] {
       });
     }
 
+    if (typeof securityContext?.runAsUser === "number") {
+      if (securityContext.runAsUser === 0) {
+        const rootSeverity =
+          securityContext?.privileged === true || securityContext?.allowPrivilegeEscalation === true
+            ? "critical"
+            : "warning";
+
+        checks.push({
+          title: `${containerName}: runAsUser`,
+          severity: rootSeverity,
+          description: "The container is explicitly configured to run as UID 0.",
+          recommendation:
+            "Set a non-root user ID unless the workload explicitly requires root privileges.",
+        });
+      } else {
+        checks.push({
+          title: `${containerName}: runAsUser`,
+          severity: "pass",
+          description: `The container is explicitly configured to run as UID ${securityContext.runAsUser}.`,
+        });
+      }
+    } else {
+      checks.push({
+        title: `${containerName}: runAsUser`,
+        severity: "warning",
+        description: "The container does not explicitly define a user ID.",
+        recommendation: "Set securityContext.runAsUser to a non-root UID when possible.",
+      });
+    }
+
     if (securityContext?.privileged === true) {
       checks.push({
         title: `${containerName}: privileged container`,
@@ -392,6 +781,168 @@ function analyzeWorkload(document: any): Check[] {
         title: `${containerName}: privileged mode`,
         severity: "pass",
         description: "The container is not explicitly configured as privileged.",
+      });
+    }
+
+    if (securityContext?.allowPrivilegeEscalation === true) {
+      checks.push({
+        title: `${containerName}: allowPrivilegeEscalation`,
+        severity: "critical",
+        description: "The container explicitly sets allowPrivilegeEscalation: true.",
+        recommendation:
+          "Set securityContext.allowPrivilegeEscalation: false unless the workload explicitly requires privilege escalation.",
+      });
+    } else if (securityContext?.allowPrivilegeEscalation === false) {
+      checks.push({
+        title: `${containerName}: allowPrivilegeEscalation`,
+        severity: "pass",
+        description: "The container explicitly disables privilege escalation.",
+      });
+    } else {
+      checks.push({
+        title: `${containerName}: allowPrivilegeEscalation`,
+        severity: "warning",
+        description: "The container does not explicitly define allowPrivilegeEscalation.",
+        recommendation:
+          "Set securityContext.allowPrivilegeEscalation: false unless the workload explicitly requires privilege escalation.",
+      });
+    }
+
+    const capabilities = securityContext?.capabilities || {};
+    const addedCapabilities = Array.isArray(capabilities.add)
+      ? capabilities.add
+          .map((cap: any) => String(cap).trim())
+          .filter(Boolean)
+      : [];
+    const droppedCapabilities = Array.isArray(capabilities.drop)
+      ? capabilities.drop
+          .map((cap: any) => String(cap).trim())
+          .filter(Boolean)
+      : [];
+
+    if (addedCapabilities.length > 0) {
+      const dangerousCaps = addedCapabilities.filter((cap: string) =>
+        getHighRiskCapabilities().has(cap.toUpperCase())
+      );
+
+      checks.push({
+        title: `${containerName}: capabilities.add`,
+        severity: dangerousCaps.length > 0 ? "critical" : "warning",
+        description: `The container adds Linux capabilities: ${addedCapabilities.join(", ")}.`,
+        recommendation:
+          "Consider dropping all Linux capabilities and adding back only the capabilities required by the application.",
+      });
+    } else {
+      checks.push({
+        title: `${containerName}: capabilities.add`,
+        severity: "pass",
+        description: "The container does not add Linux capabilities.",
+      });
+    }
+
+    if (droppedCapabilities.includes("ALL") || droppedCapabilities.includes("all")) {
+      checks.push({
+        title: `${containerName}: capabilities.drop`,
+        severity: "pass",
+        description: "The container drops all Linux capabilities.",
+      });
+    } else {
+      checks.push({
+        title: `${containerName}: capabilities.drop`,
+        severity: "warning",
+        description:
+          "The container does not explicitly drop all Linux capabilities.",
+        recommendation:
+          "Consider dropping all Linux capabilities and adding back only the capabilities required by the application.",
+      });
+    }
+
+    if (securityContext?.readOnlyRootFilesystem === true) {
+      checks.push({
+        title: `${containerName}: readOnlyRootFilesystem`,
+        severity: "pass",
+        description: "The container root filesystem is read-only.",
+      });
+    } else {
+      checks.push({
+        title: `${containerName}: readOnlyRootFilesystem`,
+        severity: "warning",
+        description: "The container root filesystem is writable.",
+        recommendation:
+          "Set securityContext.readOnlyRootFilesystem: true where the application supports a read-only root filesystem.",
+      });
+    }
+
+    const seccompType = securityContext?.seccompProfile?.type;
+    if (seccompType === "RuntimeDefault" || seccompType === "Localhost") {
+      checks.push({
+        title: `${containerName}: seccompProfile`,
+        severity: "pass",
+        description: `The container explicitly configures seccompProfile.type as "${seccompType}".`,
+      });
+    } else {
+      checks.push({
+        title: `${containerName}: seccompProfile`,
+        severity: "warning",
+        description:
+          "The container does not explicitly configure a seccomp profile.",
+        recommendation:
+          "Set seccompProfile.type to RuntimeDefault or an approved profile.",
+      });
+    }
+
+    const hostPortValues = (container?.ports || [])
+      .filter((port: any) => typeof port?.hostPort === "number")
+      .map((port: any) => `${port.containerPort || "unknown"}:${port.hostPort}`);
+
+    if (hostPortValues.length > 0) {
+      checks.push({
+        title: `${containerName}: hostPort`,
+        severity: "warning",
+        description: `The container is bound to host ports: ${hostPortValues.join(", ")}.`,
+        recommendation:
+          "Prefer a Kubernetes Service instead of hostPort unless node-level port binding is explicitly required.",
+      });
+    } else {
+      checks.push({
+        title: `${containerName}: hostPort`,
+        severity: "pass",
+        description: "The container does not bind to host ports.",
+      });
+    }
+
+    const imagePullPolicy = container?.imagePullPolicy;
+    if (typeof imagePullPolicy === "string") {
+      checks.push({
+        title: `${containerName}: imagePullPolicy`,
+        severity: "pass",
+        description: `The container explicitly sets imagePullPolicy to "${imagePullPolicy}".`,
+      });
+    } else {
+      checks.push({
+        title: `${containerName}: imagePullPolicy`,
+        severity: "warning",
+        description:
+          "The container does not explicitly set imagePullPolicy, which can create operational inconsistency.",
+        recommendation:
+          "Set imagePullPolicy explicitly to match your deployment policy and image lifecycle needs.",
+      });
+    }
+
+    if (container?.startupProbe) {
+      checks.push({
+        title: `${containerName}: startupProbe`,
+        severity: "pass",
+        description: "A startup probe is configured.",
+      });
+    } else {
+      checks.push({
+        title: `${containerName}: startupProbe`,
+        severity: "warning",
+        description:
+          "No startup probe is configured for this container.",
+        recommendation:
+          "Consider adding a startupProbe for slow-starting applications to prevent premature restarts.",
       });
     }
 

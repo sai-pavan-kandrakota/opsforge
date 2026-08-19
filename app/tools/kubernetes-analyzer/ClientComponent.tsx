@@ -981,6 +981,668 @@ function analyzeWorkload(document: any): Check[] {
   return checks;
 }
 
+const DEPRECATED_KUBERNETES_APIS = [
+  {
+    apiVersion: "extensions/v1beta1",
+    kinds: ["Ingress", "Deployment", "DaemonSet", "ReplicaSet", "NetworkPolicy"],
+    reason: "This API group is deprecated and removed from newer Kubernetes versions.",
+    replacement: "Use the stable API versions in networking.k8s.io/v1, apps/v1, or policy/v1.",
+  },
+  {
+    apiVersion: "apps/v1beta1",
+    kinds: ["Deployment", "StatefulSet", "DaemonSet"],
+    reason: "The apps/v1beta1 API is deprecated in favor of the stable apps/v1 API.",
+    replacement: "Use apps/v1 for workload resources.",
+  },
+  {
+    apiVersion: "apps/v1beta2",
+    kinds: ["Deployment", "StatefulSet", "DaemonSet"],
+    reason: "The apps/v1beta2 API is deprecated and no longer the recommended API version.",
+    replacement: "Use apps/v1 for workload resources.",
+  },
+  {
+    apiVersion: "networking.k8s.io/v1beta1",
+    kinds: ["Ingress"],
+    reason: "Ingress in networking.k8s.io/v1beta1 is deprecated in favor of networking.k8s.io/v1.",
+    replacement: "Use networking.k8s.io/v1 and the modern ingress specification.",
+  },
+  {
+    apiVersion: "batch/v1beta1",
+    kinds: ["CronJob"],
+    reason: "The beta CronJob API was replaced by the stable batch/v1 API.",
+    replacement: "Use batch/v1 for CronJob resources.",
+  },
+];
+
+function getResourceName(document: any): string {
+  return document?.metadata?.name || "<unnamed>";
+}
+
+function getResourceNamespace(document: any): string {
+  return document?.metadata?.namespace || "<none>";
+}
+
+function getWorkloadLabels(workload: any): Record<string, string> {
+  if (!workload || typeof workload !== "object") return {};
+
+  if (workload.kind === "Pod") {
+    return workload?.metadata?.labels || workload?.spec?.metadata?.labels || {};
+  }
+
+  if (workload.kind === "CronJob") {
+    return (
+      workload?.spec?.jobTemplate?.spec?.template?.metadata?.labels ||
+      workload?.metadata?.labels ||
+      {}
+    );
+  }
+
+  return workload?.spec?.template?.metadata?.labels || workload?.metadata?.labels || {};
+}
+
+function getWorkloadReplicas(workload: any): number {
+  if (!workload || typeof workload !== "object") return 0;
+
+  if (workload.kind === "Deployment" || workload.kind === "StatefulSet" || workload.kind === "ReplicaSet" || workload.kind === "DaemonSet") {
+    return typeof workload?.spec?.replicas === "number" ? workload.spec.replicas : 1;
+  }
+
+  if (workload.kind === "Job") {
+    return typeof workload?.spec?.parallelism === "number" ? workload.spec.parallelism : 1;
+  }
+
+  if (workload.kind === "CronJob") {
+    return typeof workload?.spec?.jobTemplate?.spec?.parallelism === "number" ? workload.spec.jobTemplate.spec.parallelism : 1;
+  }
+
+  if (workload.kind === "Pod") {
+    return 1;
+  }
+
+  return 0;
+}
+
+function hasSelectorContent(selector: any): boolean {
+  if (!selector || typeof selector !== "object") return false;
+
+  if (Object.keys(selector).length === 0) return false;
+
+  const keys = Object.keys(selector);
+  if (keys.includes("matchLabels") || keys.includes("matchExpressions")) {
+    const matchLabels = selector.matchLabels || {};
+    const matchExpressions = Array.isArray(selector.matchExpressions) ? selector.matchExpressions : [];
+    return Object.keys(matchLabels).length > 0 || matchExpressions.length > 0;
+  }
+
+  return true;
+}
+
+function selectorMatches(selector: any, labels: Record<string, string> | undefined): boolean {
+  if (!selector || typeof selector !== "object") return false;
+
+  const selectorObject = selector.matchLabels || selector.matchExpressions ? selector : { matchLabels: selector };
+  const matchLabels = selectorObject.matchLabels || {};
+  const matchExpressions = Array.isArray(selectorObject.matchExpressions) ? selectorObject.matchExpressions : [];
+
+  if (Object.keys(matchLabels).length === 0 && matchExpressions.length === 0) {
+    return true;
+  }
+
+  if (!labels || typeof labels !== "object") {
+    return false;
+  }
+
+  for (const [key, value] of Object.entries(matchLabels)) {
+    if (labels[key] !== String(value)) {
+      return false;
+    }
+  }
+
+  for (const expression of matchExpressions) {
+    if (!expression || typeof expression !== "object") {
+      return false;
+    }
+
+    const key = String(expression.key || "");
+    const operator = String(expression.operator || "");
+    const actualValue = labels[key];
+    const values = Array.isArray(expression.values) ? expression.values.map((item: any) => String(item)) : [];
+
+    switch (operator) {
+      case "In":
+        if (!key || !values.length || !actualValue || !values.includes(actualValue)) return false;
+        break;
+      case "NotIn":
+        if (!key || actualValue && values.includes(actualValue)) return false;
+        break;
+      case "Exists":
+        if (!key || !(key in labels)) return false;
+        break;
+      case "DoesNotExist":
+        if (!key || key in labels) return false;
+        break;
+      case "Gt":
+        if (!key || actualValue === undefined || Number(actualValue) <= Number(values[0] || 0)) return false;
+        break;
+      case "Lt":
+        if (!key || actualValue === undefined || Number(actualValue) >= Number(values[0] || 0)) return false;
+        break;
+      default:
+        return false;
+    }
+  }
+
+  return true;
+}
+
+function collectManifest(resources: any[]) {
+  const manifest = {
+    resources: [] as any[],
+    workloads: [] as any[],
+    services: [] as any[],
+    ingresses: [] as any[],
+    networkPolicies: [] as any[],
+    podDisruptionBudgets: [] as any[],
+    roles: [] as any[],
+    clusterRoles: [] as any[],
+    roleBindings: [] as any[],
+    clusterRoleBindings: [] as any[],
+  };
+
+  resources.forEach((document) => {
+    if (!document || typeof document !== "object") return;
+
+    manifest.resources.push(document);
+
+    switch (document.kind) {
+      case "Deployment":
+      case "StatefulSet":
+      case "DaemonSet":
+      case "Job":
+      case "CronJob":
+      case "Pod":
+        manifest.workloads.push(document);
+        break;
+      case "Service":
+        manifest.services.push(document);
+        break;
+      case "Ingress":
+        manifest.ingresses.push(document);
+        break;
+      case "NetworkPolicy":
+        manifest.networkPolicies.push(document);
+        break;
+      case "PodDisruptionBudget":
+        manifest.podDisruptionBudgets.push(document);
+        break;
+      case "Role":
+        manifest.roles.push(document);
+        break;
+      case "ClusterRole":
+        manifest.clusterRoles.push(document);
+        break;
+      case "RoleBinding":
+        manifest.roleBindings.push(document);
+        break;
+      case "ClusterRoleBinding":
+        manifest.clusterRoleBindings.push(document);
+        break;
+      default:
+        break;
+    }
+  });
+
+  return manifest;
+}
+
+function analyzeService(document: any, manifest: ReturnType<typeof collectManifest>): Check[] {
+  const checks: Check[] = [];
+  const serviceType = document?.spec?.type || "ClusterIP";
+
+  if (serviceType === "ClusterIP") {
+    checks.push({
+      title: "Service exposure",
+      severity: "pass",
+      description: `Service ${getResourceName(document)} uses type ClusterIP, which only exposes the service inside the cluster.`,
+    });
+  } else if (serviceType === "NodePort") {
+    checks.push({
+      title: "Service exposure",
+      severity: "warning",
+      description: `Service ${getResourceName(document)} exposes a NodePort, which makes the service reachable on each node's IP and port.`,
+      recommendation: "Prefer an internal Service or an Ingress/LB pattern where node-level exposure is not required.",
+    });
+  } else if (serviceType === "LoadBalancer") {
+    checks.push({
+      title: "Service exposure",
+      severity: "warning",
+      description: `Service ${getResourceName(document)} uses type LoadBalancer, which creates external reachability depending on the cloud provider or ingress controller.`,
+      recommendation: "Confirm the external exposure is intentional and protected with firewall, ingress, and TLS controls where appropriate.",
+    });
+  } else {
+    checks.push({
+      title: "Service exposure",
+      severity: "pass",
+      description: `Service ${getResourceName(document)} uses service type ${serviceType}.`,
+    });
+  }
+
+  const selector = document?.spec?.selector;
+  if (selector && hasSelectorContent(selector)) {
+    const matchingWorkloads = manifest.workloads.filter((workload) => {
+      const labels = getWorkloadLabels(workload);
+      const sameNamespace = getResourceNamespace(workload) === getResourceNamespace(document);
+      return sameNamespace && selectorMatches(selector, labels);
+    });
+
+    const candidateWorkloads = manifest.workloads.filter(
+      (workload) => getResourceNamespace(workload) === getResourceNamespace(document)
+    );
+    const labeledCandidates = candidateWorkloads.filter(
+      (workload) => Object.keys(getWorkloadLabels(workload)).length > 0
+    );
+
+    if (matchingWorkloads.length > 0) {
+      checks.push({
+        title: "Service selector relationship",
+        severity: "pass",
+        description: `Service ${getResourceName(document)} appears to select ${matchingWorkloads.length} workload(s) in the supplied manifest.`,
+      });
+    } else if (candidateWorkloads.length === 0) {
+      checks.push({
+        title: "Service selector relationship",
+        severity: "warning",
+        description: `Service ${getResourceName(document)} defines a selector but no workload is present in the supplied manifest to verify the relationship.`,
+        recommendation: "Unable to verify from supplied manifests. Add the target workload or confirm the Service selector matches the workload labels.",
+      });
+    } else if (labeledCandidates.length === 0) {
+      checks.push({
+        title: "Service selector relationship",
+        severity: "warning",
+        description: `Service ${getResourceName(document)} defines a selector but none of the workloads in the supplied manifest expose enough label data to verify the match.`,
+        recommendation: "Unable to verify from supplied manifests. Confirm the workload labels and Service selector align before relying on the routing target.",
+      });
+    } else {
+      checks.push({
+        title: "Service selector relationship",
+        severity: "warning",
+        description: `Service ${getResourceName(document)} declares selector ${JSON.stringify(selector)} but no workload in the supplied manifest matches it.`,
+        recommendation: "Verify that the Service selector matches the labels on the target workload before exposing traffic.",
+      });
+    }
+  }
+
+  return checks;
+}
+
+function analyzeIngress(document: any, manifest: ReturnType<typeof collectManifest>): Check[] {
+  const checks: Check[] = [];
+  const hostNames = [] as string[];
+  const paths = [] as string[];
+
+  const rules = Array.isArray(document?.spec?.rules) ? document.spec.rules : [];
+
+  rules.forEach((rule: any) => {
+    if (rule?.host) hostNames.push(rule.host);
+
+    const rulePaths = Array.isArray(rule?.http?.paths)
+      ? rule.http.paths
+          .map((pathObj: any) => pathObj?.path || "/")
+          .filter(Boolean)
+      : [];
+
+    paths.push(...rulePaths);
+  });
+
+  if (rules.length === 0 && document?.spec?.defaultBackend) {
+    checks.push({
+      title: "Ingress backend",
+      severity: "pass",
+      description: `Ingress ${getResourceName(document)} defines a default backend.`,
+    });
+  }
+
+  if (hostNames.length > 0) {
+    checks.push({
+      title: "Ingress hosts",
+      severity: "pass",
+      description: `Ingress ${getResourceName(document)} exposes hosts: ${hostNames.join(", ")}.`,
+    });
+  } else {
+    checks.push({
+      title: "Ingress hosts",
+      severity: "warning",
+      description: `Ingress ${getResourceName(document)} does not define explicit host names.`,
+      recommendation: "Define hostnames when routing external traffic through the ingress.",
+    });
+  }
+
+  if (paths.length > 0) {
+    checks.push({
+      title: "Ingress paths",
+      severity: "pass",
+      description: `Ingress ${getResourceName(document)} defines paths: ${paths.join(", ")}.`,
+    });
+  }
+
+  const tlsHosts = Array.isArray(document?.spec?.tls)
+    ? document.spec.tls.flatMap((tlsEntry: any) => Array.isArray(tlsEntry?.hosts) ? tlsEntry.hosts : [])
+    : [];
+
+  if (hostNames.length > 0) {
+    const hasTls = tlsHosts.length > 0;
+    const externalHosts = hostNames.filter((host) => !host.includes("localhost") && !(host.includes("cluster.local") || host.includes("svc.cluster.local")));
+
+    if (externalHosts.length > 0 && !hasTls) {
+      checks.push({
+        title: "Ingress TLS",
+        severity: "warning",
+        description: `Ingress ${getResourceName(document)} exposes external HTTP host(s) without TLS configuration in the supplied manifest.`,
+        recommendation: "Configure TLS for externally exposed HTTP endpoints.",
+      });
+    } else {
+      checks.push({
+        title: "Ingress TLS",
+        severity: "pass",
+        description: `Ingress ${getResourceName(document)} includes TLS configuration or no externally exposed HTTP host was identified.`,
+      });
+    }
+  }
+
+  const backendRefs = [] as string[];
+
+  rules.forEach((rule: any) => {
+    if (Array.isArray(rule?.http?.paths)) {
+      rule.http.paths.forEach((pathObj: any) => {
+        const serviceName = pathObj?.backend?.service?.name;
+        if (serviceName) backendRefs.push(serviceName);
+      });
+    }
+
+    if (rule?.http?.paths?.length === 0 && rule?.http?.defaultBackend?.service?.name) {
+      backendRefs.push(rule.http.defaultBackend.service.name);
+    }
+  });
+
+  if (document?.spec?.defaultBackend?.service?.name) {
+    backendRefs.push(document.spec.defaultBackend.service.name);
+  }
+
+  const uniqueRefs = Array.from(new Set(backendRefs));
+  if (uniqueRefs.length > 0) {
+    const missing = uniqueRefs.filter((serviceName) => !manifest.services.some((service) => service.metadata?.name === serviceName && (service.metadata?.namespace || "<none>") === (document.metadata?.namespace || "<none>")));
+
+    if (missing.length > 0) {
+      checks.push({
+        title: "Ingress backend service",
+        severity: "warning",
+        description: `Ingress ${getResourceName(document)} references Service(s) ${missing.join(", ")} that were not found in the supplied manifest.`,
+        recommendation: "Verify the referenced Service exists in the supplied manifest and points to the intended workload.",
+      });
+    } else {
+      checks.push({
+        title: "Ingress backend service",
+        severity: "pass",
+        description: `Ingress ${getResourceName(document)} references Services that are present in the supplied manifest.`,
+      });
+    }
+  }
+
+  return checks;
+}
+
+function analyzeNetworkPolicy(document: any, manifest: ReturnType<typeof collectManifest>): Check[] {
+  const checks: Check[] = [];
+
+  checks.push({
+    title: "NetworkPolicy detected",
+    severity: "pass",
+    description: `NetworkPolicy ${getResourceName(document)} in namespace ${getResourceNamespace(document)} was detected.`,
+  });
+
+  const podSelector = document?.spec?.podSelector || {};
+  const hasPodSelector = hasSelectorContent(podSelector);
+  if (hasPodSelector) {
+    checks.push({
+      title: "NetworkPolicy pod selector",
+      severity: "pass",
+      description: `NetworkPolicy ${getResourceName(document)} defines a podSelector: ${JSON.stringify(podSelector)}.`,
+    });
+  } else {
+    checks.push({
+      title: "NetworkPolicy pod selector",
+      severity: "warning",
+      description: `NetworkPolicy ${getResourceName(document)} does not define a specific podSelector in the supplied manifest. Empty podSelector semantics would apply to all pods in the namespace.`,
+      recommendation: "Define a podSelector that matches the intended workload so the policy scope is explicit and reviewable.",
+    });
+  }
+
+  const ingressRules = Array.isArray(document?.spec?.ingress) ? document.spec.ingress : [];
+  const egressRules = Array.isArray(document?.spec?.egress) ? document.spec.egress : [];
+
+  if (ingressRules.length > 0 || egressRules.length > 0) {
+    checks.push({
+      title: "NetworkPolicy rules",
+      severity: "pass",
+      description: `NetworkPolicy ${getResourceName(document)} defines ${ingressRules.length} ingress rule(s) and ${egressRules.length} egress rule(s).`,
+    });
+  } else {
+    checks.push({
+      title: "NetworkPolicy rules",
+      severity: "warning",
+      description: `NetworkPolicy ${getResourceName(document)} does not define ingress or egress rules in the supplied manifest.`,
+      recommendation: "Add explicit ingress and egress rules that match the workload communication model.",
+    });
+  }
+
+  const matchingWorkloads = manifest.workloads.filter((workload) => {
+    const workloadLabels = getWorkloadLabels(workload);
+    const workloadNamespace = getResourceNamespace(workload);
+    const policyNamespace = getResourceNamespace(document);
+
+    if (workloadNamespace !== policyNamespace) return false;
+    if (!hasPodSelector) return true;
+
+    return selectorMatches(podSelector, workloadLabels);
+  });
+
+  if (matchingWorkloads.length > 0) {
+    checks.push({
+      title: "Policy workload match",
+      severity: "pass",
+      description: `NetworkPolicy ${getResourceName(document)} appears to select ${matchingWorkloads.length} workload(s).`,
+    });
+  } else if (manifest.workloads.some((workload) => getResourceNamespace(workload) === getResourceNamespace(document))) {
+    checks.push({
+      title: "Policy workload match",
+      severity: "warning",
+      description: `NetworkPolicy ${getResourceName(document)} in namespace ${getResourceNamespace(document)} does not appear to select any workload in the supplied manifest.`,
+      recommendation: "Verify the policy's podSelector matches the target workload labels before relying on it for traffic isolation.",
+    });
+  } else {
+    checks.push({
+      title: "Policy workload match",
+      severity: "warning",
+      description: `NetworkPolicy ${getResourceName(document)} defines a podSelector, but no workload in the same namespace is present in the supplied manifest to verify confinement.`,
+      recommendation: "Unable to verify from supplied manifests. Add the target workloads or confirm the podSelector matches the intended workload labels.",
+    });
+  }
+
+  return checks;
+}
+
+function analyzePdb(document: any, manifest: ReturnType<typeof collectManifest>): Check[] {
+  const checks: Check[] = [];
+  const minAvailable = document?.spec?.minAvailable;
+  const maxUnavailable = document?.spec?.maxUnavailable;
+  const selector = document?.spec?.selector || {};
+
+  if (minAvailable !== undefined) {
+    checks.push({
+      title: "PDB minimum availability",
+      severity: "pass",
+      description: `PodDisruptionBudget ${getResourceName(document)} sets minAvailable to ${String(minAvailable)}.`,
+    });
+  } else if (maxUnavailable !== undefined) {
+    checks.push({
+      title: "PDB disruption limit",
+      severity: "pass",
+      description: `PodDisruptionBudget ${getResourceName(document)} sets maxUnavailable to ${String(maxUnavailable)}.`,
+    });
+  } else {
+    checks.push({
+      title: "PDB availability settings",
+      severity: "warning",
+      description: `PodDisruptionBudget ${getResourceName(document)} does not define minAvailable or maxUnavailable in the supplied manifest.`,
+      recommendation: "Define a clear disruption budget to protect availability during voluntary disruptions.",
+    });
+  }
+
+  if (selector && hasSelectorContent(selector)) {
+    const matchingWorkloads = manifest.workloads.filter((workload) => {
+      const workloadLabels = getWorkloadLabels(workload);
+      const sameNamespace = getResourceNamespace(workload) === getResourceNamespace(document);
+      return sameNamespace && selectorMatches(selector, workloadLabels);
+    });
+
+    const sameNamespaceWorkloads = manifest.workloads.filter(
+      (workload) => getResourceNamespace(workload) === getResourceNamespace(document)
+    );
+    const labeledWorkloads = sameNamespaceWorkloads.filter(
+      (workload) => Object.keys(getWorkloadLabels(workload)).length > 0
+    );
+
+    if (matchingWorkloads.length > 0) {
+      checks.push({
+        title: "PDB selector match",
+        severity: "pass",
+        description: `PodDisruptionBudget ${getResourceName(document)} appears to select ${matchingWorkloads.length} workload(s).`,
+      });
+    } else if (sameNamespaceWorkloads.length === 0) {
+      checks.push({
+        title: "PDB selector match",
+        severity: "warning",
+        description: `PodDisruptionBudget ${getResourceName(document)} defines a selector but no workload is present in the supplied manifest to verify the relationship.`,
+        recommendation: "Unable to verify from supplied manifests. Confirm the selector matches the intended workload labels before relying on the disruption budget.",
+      });
+    } else if (labeledWorkloads.length === 0) {
+      checks.push({
+        title: "PDB selector match",
+        severity: "warning",
+        description: `PodDisruptionBudget ${getResourceName(document)} defines a selector but the workloads in the supplied manifest do not expose enough label information to confirm the match.`,
+        recommendation: "Unable to verify from supplied manifests. Review the workload labels used by the selector to confirm the PDB is targeted correctly.",
+      });
+    } else {
+      checks.push({
+        title: "PDB selector match",
+        severity: "warning",
+        description: `PodDisruptionBudget ${getResourceName(document)} does not appear to select any workload in the supplied manifest.`,
+        recommendation: "Verify the selector matches the target workload labels before relying on the disruption budget.",
+      });
+    }
+  }
+
+  return checks;
+}
+
+function analyzeRbac(document: any): Check[] {
+  const checks: Check[] = [];
+  const kind = document?.kind;
+  const name = getResourceName(document);
+  const namespace = getResourceNamespace(document);
+
+  const rules = Array.isArray(document?.rules) ? document.rules : [];
+
+  if (rules.length === 0) {
+    checks.push({
+      title: "RBAC rules",
+      severity: "warning",
+      description: `${kind} ${name} does not define any rules in the supplied manifest.`,
+      recommendation: "Define the minimum allowed permissions explicitly for the role or cluster role.",
+    });
+    return checks;
+  }
+
+  rules.forEach((rule: any, index: number) => {
+    const apiGroups = Array.isArray(rule?.apiGroups) ? rule.apiGroups.map(String) : [];
+    const resources = Array.isArray(rule?.resources) ? rule.resources.map(String) : [];
+    const verbs = Array.isArray(rule?.verbs) ? rule.verbs.map(String) : [];
+    const ruleText = JSON.stringify(rule);
+
+    const isWildcardRule =
+      resources.includes("*") ||
+      apiGroups.includes("*") ||
+      verbs.includes("*");
+
+    if (isWildcardRule) {
+      checks.push({
+        title: `${kind} rule ${index + 1}`,
+        severity: apiGroups.includes("*") && resources.includes("*") && verbs.includes("*") ? "critical" : "warning",
+        description: `${kind} ${name} in namespace ${namespace} includes a broad wildcard rule: ${ruleText}.`,
+        recommendation: "Limit RBAC permissions to the specific resources and verbs required by the workload or controller.",
+      });
+    } else {
+      checks.push({
+        title: `${kind} rule ${index + 1}`,
+        severity: "pass",
+        description: `${kind} ${name} grants explicit permissions: ${ruleText}.`,
+      });
+    }
+  });
+
+  if (kind === "RoleBinding" || kind === "ClusterRoleBinding") {
+    const subjects = Array.isArray(document?.subjects) ? document.subjects : [];
+
+    if (subjects.length === 0) {
+      checks.push({
+        title: "RBAC subjects",
+        severity: "warning",
+        description: `${kind} ${name} does not declare any subjects.`,
+        recommendation: "Bind the role to the intended subject so access is clearly scoped and reviewable.",
+      });
+    }
+
+    subjects.forEach((subject: any) => {
+      if (subject?.kind === "ServiceAccount") {
+        const subjectNamespace = subject?.namespace || namespace;
+        const bindingScope = kind === "ClusterRoleBinding" ? "cluster-wide" : "namespace-scoped";
+        const severity = kind === "ClusterRoleBinding" ? "warning" : "pass";
+
+        checks.push({
+          title: "ServiceAccount binding",
+          severity,
+          description: `${kind} ${name} binds ${subject.kind} ${subject.name} in namespace ${subjectNamespace} with ${bindingScope} scope.`,
+          recommendation: "Confirm that the ServiceAccount is intended to receive this access and avoid cluster-wide bindings unless necessary.",
+        });
+      }
+    });
+  }
+
+  return checks;
+}
+
+function analyzeDeprecatedApi(document: any): Check[] {
+  const checks: Check[] = [];
+  const apiVersion = document?.apiVersion || "unknown";
+  const kind = document?.kind || "unknown";
+
+  const match = DEPRECATED_KUBERNETES_APIS.find((entry) => {
+    if (entry.apiVersion !== apiVersion) return false;
+    return entry.kinds.includes(kind) || entry.kinds.length === 0;
+  });
+
+  if (!match) return checks;
+
+  checks.push({
+    title: "Deprecated API version",
+    severity: "warning",
+    description: `${kind} ${getResourceName(document)} uses apiVersion ${apiVersion}. ${match.reason}`,
+    recommendation: `Use ${match.replacement}`,
+  });
+
+  return checks;
+}
+
 function analyzeYaml(input: string): {
   resources: ResourceResult[];
   error?: string;
@@ -995,6 +1657,7 @@ function analyzeYaml(input: string): {
       return { resources: [], error: "The YAML input is empty or invalid." };
     }
 
+    const manifest = collectManifest(docs);
     const resources: ResourceResult[] = [];
 
     docs.forEach((document, idx) => {
@@ -1017,10 +1680,8 @@ function analyzeYaml(input: string): {
 
       const apiVersion = document.apiVersion || "unknown";
       const kind = document.kind || "<unknown>";
-      const name = document?.metadata?.name || "<unnamed>";
-      const namespace = document?.metadata?.namespace || "<none>";
-
-      // Supported kinds for V2.1
+      const name = getResourceName(document);
+      const namespace = getResourceNamespace(document);
       const supportedKinds = [
         "Pod",
         "Deployment",
@@ -1030,8 +1691,10 @@ function analyzeYaml(input: string): {
         "CronJob",
       ];
 
+      let checks: Check[] = [];
+
       if (kind === "Deployment") {
-        const baseChecks: Check[] = [
+        checks = [
           {
             title: "YAML syntax",
             severity: "pass",
@@ -1042,64 +1705,301 @@ function analyzeYaml(input: string): {
             severity: "pass",
             description: "A Kubernetes Deployment was detected.",
           },
+          ...analyzeDeployment(document),
         ];
-
-        const deploymentChecks = analyzeDeployment(document);
-
-        resources.push({
-          apiVersion,
-          kind,
-          name,
-          namespace,
-          checks: [...baseChecks, ...deploymentChecks],
-        });
       } else if (supportedKinds.includes(kind)) {
-        const checks = analyzeWorkload(document);
-
-        resources.push({
-          apiVersion,
-          kind,
-          name,
-          namespace,
-          checks: [
-            {
-              title: "YAML syntax",
-              severity: "pass",
-              description: "The YAML document was parsed successfully.",
-            },
-            {
-              title: "Detected resource",
-              severity: "pass",
-              description: `Detected ${kind} resource.`,
-            },
-            ...checks,
-          ],
-        });
+        checks = [
+          {
+            title: "YAML syntax",
+            severity: "pass",
+            description: "The YAML document was parsed successfully.",
+          },
+          {
+            title: "Detected resource",
+            severity: "pass",
+            description: `Detected ${kind} resource.`,
+          },
+          ...analyzeWorkload(document),
+        ];
+      } else if (kind === "Service") {
+        checks = [
+          {
+            title: "YAML syntax",
+            severity: "pass",
+            description: "The YAML document was parsed successfully.",
+          },
+          {
+            title: "Detected resource",
+            severity: "pass",
+            description: `Detected ${kind} resource.`,
+          },
+          ...analyzeService(document, manifest),
+        ];
+      } else if (kind === "Ingress") {
+        checks = [
+          {
+            title: "YAML syntax",
+            severity: "pass",
+            description: "The YAML document was parsed successfully.",
+          },
+          {
+            title: "Detected resource",
+            severity: "pass",
+            description: `Detected ${kind} resource.`,
+          },
+          ...analyzeIngress(document, manifest),
+        ];
+      } else if (kind === "NetworkPolicy") {
+        checks = [
+          {
+            title: "YAML syntax",
+            severity: "pass",
+            description: "The YAML document was parsed successfully.",
+          },
+          {
+            title: "Detected resource",
+            severity: "pass",
+            description: `Detected ${kind} resource.`,
+          },
+          ...analyzeNetworkPolicy(document, manifest),
+        ];
+      } else if (kind === "PodDisruptionBudget") {
+        checks = [
+          {
+            title: "YAML syntax",
+            severity: "pass",
+            description: "The YAML document was parsed successfully.",
+          },
+          {
+            title: "Detected resource",
+            severity: "pass",
+            description: `Detected ${kind} resource.`,
+          },
+          ...analyzePdb(document, manifest),
+        ];
+      } else if (kind === "Role" || kind === "ClusterRole" || kind === "RoleBinding" || kind === "ClusterRoleBinding") {
+        checks = [
+          {
+            title: "YAML syntax",
+            severity: "pass",
+            description: "The YAML document was parsed successfully.",
+          },
+          {
+            title: "Detected resource",
+            severity: "pass",
+            description: `Detected ${kind} resource.`,
+          },
+          ...analyzeRbac(document),
+        ];
+      } else if (kind === "<unknown>") {
+        checks = [
+          {
+            title: "YAML syntax",
+            severity: "pass",
+            description: "The YAML document was parsed successfully.",
+          },
+          {
+            title: "Document does not define a kind",
+            severity: "warning",
+            description: "This document has no kind and cannot be mapped to a Kubernetes resource type.",
+            recommendation: "Add a valid Kubernetes kind to the YAML document.",
+          },
+        ];
       } else {
-        // Unsupported resource kinds: detect and note coming soon
-        resources.push({
-          apiVersion,
-          kind,
-          name,
-          namespace,
-          checks: [
-            {
-              title: "YAML syntax",
-              severity: "pass",
-              description: "The YAML document was parsed successfully.",
-            },
-            {
-              title: "Detected resource",
-              severity: "pass",
-              description: `Detected ${kind} resource.`,
-            },
-            {
-              title: "Detailed analysis coming soon",
-              severity: "warning",
-              description: `Detailed ${kind} analysis is not available in this version.`,
-              recommendation: "Support for this resource will be added in a future release.",
-            },
-          ],
+        checks = [
+          {
+            title: "YAML syntax",
+            severity: "pass",
+            description: "The YAML document was parsed successfully.",
+          },
+          {
+            title: "Detected resource",
+            severity: "pass",
+            description: `Detected ${kind} resource.`,
+          },
+          {
+            title: "Detailed analysis coming soon",
+            severity: "warning",
+            description: `Detailed ${kind} analysis is not available in this version.`,
+            recommendation: "Support for this resource will be added in a future release.",
+          },
+        ];
+      }
+
+      const deprecatedChecks = analyzeDeprecatedApi(document);
+      if (deprecatedChecks.length > 0) {
+        checks = [...checks, ...deprecatedChecks];
+      }
+
+      resources.push({
+        apiVersion,
+        kind,
+        name,
+        namespace,
+        checks,
+      });
+    });
+
+    const workloadResources = resources.filter((resource) => [
+      "Pod",
+      "Deployment",
+      "StatefulSet",
+      "DaemonSet",
+      "Job",
+      "CronJob",
+    ].includes(resource.kind));
+
+    const workloadMatches = new Map<string, any[]>();
+    const networkPolicies = manifest.networkPolicies || [];
+
+    workloadResources.forEach((workload) => {
+      const workloadDoc = manifest.workloads.find((candidate) => {
+        return getResourceName(candidate) === workload.name && getResourceNamespace(candidate) === workload.namespace;
+      });
+
+      if (!workloadDoc) return;
+
+      const matchingPolicies = networkPolicies.filter((policy) => {
+        const policyNamespace = getResourceNamespace(policy);
+        const podSelector = policy?.spec?.podSelector || {};
+
+        if (policyNamespace !== workload.namespace) return false;
+        if (!hasSelectorContent(podSelector)) return true;
+
+        return selectorMatches(podSelector, getWorkloadLabels(workloadDoc));
+      });
+
+      workloadMatches.set(`${workload.namespace}/${workload.name}`, matchingPolicies);
+    });
+
+    resources.forEach((resource) => {
+      if (!["Deployment", "StatefulSet", "DaemonSet", "Job", "CronJob", "Pod"].includes(resource.kind)) return;
+
+      const workloadDoc = manifest.workloads.find((candidate) => {
+        return getResourceName(candidate) === resource.name && getResourceNamespace(candidate) === resource.namespace;
+      });
+      const replicas = getWorkloadReplicas(workloadDoc);
+      const applicablePolicies = workloadMatches.get(`${resource.namespace}/${resource.name}`) || [];
+
+      if (replicas >= 2 && applicablePolicies.length === 0) {
+        resource.checks.push({
+          title: "NetworkPolicy coverage",
+          severity: "warning",
+          description: `Workload ${resource.kind} ${resource.name} in namespace ${resource.namespace} has multiple replicas but no matching NetworkPolicy was found in the supplied manifest.`,
+          recommendation: "Define a NetworkPolicy that restricts ingress and egress to the expected traffic pattern for this workload.",
+        });
+      }
+
+      const matchingPdbs = manifest.podDisruptionBudgets.filter((pdb) => {
+        const selector = pdb?.spec?.selector || {};
+        if (!hasSelectorContent(selector)) return false;
+        if (getResourceNamespace(pdb) !== resource.namespace) return false;
+        return selectorMatches(selector, getWorkloadLabels(workloadDoc));
+      });
+
+      if (replicas >= 2 && matchingPdbs.length === 0) {
+        resource.checks.push({
+          title: "PodDisruptionBudget coverage",
+          severity: "warning",
+          description: `Workload ${resource.kind} ${resource.name} in namespace ${resource.namespace} has multiple replicas but no matching PodDisruptionBudget was found in the supplied manifest.`,
+          recommendation: "Consider configuring a PodDisruptionBudget for workloads that require availability during voluntary disruptions.",
+        });
+      }
+    });
+
+    const serviceResults = resources.filter((resource) => resource.kind === "Service");
+    serviceResults.forEach((resource) => {
+      const serviceDoc = manifest.services.find((doc) => getResourceName(doc) === resource.name && getResourceNamespace(doc) === resource.namespace);
+      if (!serviceDoc) return;
+
+      const selector = serviceDoc?.spec?.selector;
+      if (selector && hasSelectorContent(selector)) {
+        const candidateWorkloads = manifest.workloads.filter(
+          (candidate) => getResourceNamespace(candidate) === getResourceNamespace(serviceDoc)
+        );
+        const labeledCandidates = candidateWorkloads.filter(
+          (candidate) => Object.keys(getWorkloadLabels(candidate)).length > 0
+        );
+        const matches = candidateWorkloads.filter((candidate) => selectorMatches(selector, getWorkloadLabels(candidate)));
+
+        if (matches.length > 0) {
+          resource.checks.push({
+            title: "Service selector validation",
+            severity: "pass",
+            description: `Service ${resource.name} in namespace ${resource.namespace} appears to match ${matches.length} workload(s) in the supplied manifest.`,
+          });
+        } else if (candidateWorkloads.length === 0) {
+          resource.checks.push({
+            title: "Service selector validation",
+            severity: "warning",
+            description: `Service ${resource.name} in namespace ${resource.namespace} defines a selector but there are no workloads in the same namespace available to verify the relationship.`,
+            recommendation: "Unable to verify from supplied manifests. Add the workload or confirm the selector matches the pod labels.",
+          });
+        } else if (labeledCandidates.length === 0) {
+          resource.checks.push({
+            title: "Service selector validation",
+            severity: "warning",
+            description: `Service ${resource.name} in namespace ${resource.namespace} defines selector ${JSON.stringify(selector)}, but the workloads in the supplied manifest do not expose enough label data to verify the relationship.`,
+            recommendation: "Unable to verify from supplied manifests. Confirm that the target workload labels and Service selector align before relying on the Service target.",
+          });
+        } else {
+          resource.checks.push({
+            title: "Service selector validation",
+            severity: "warning",
+            description: `Service ${resource.name} in namespace ${resource.namespace} declares selector ${JSON.stringify(selector)} but no workload in the supplied manifest matches it.`,
+            recommendation: "Verify that the Service selector matches the labels on the target workload.",
+          });
+        }
+      }
+    });
+
+    const ingressResults = resources.filter((resource) => resource.kind === "Ingress");
+    ingressResults.forEach((resource) => {
+      const ingressDoc = manifest.ingresses.find((doc) => getResourceName(doc) === resource.name && getResourceNamespace(doc) === resource.namespace);
+      if (!ingressDoc) return;
+
+      const rules = Array.isArray(ingressDoc?.spec?.rules) ? ingressDoc.spec.rules : [];
+      const backendRefs = [] as string[];
+      rules.forEach((rule: any) => {
+        if (Array.isArray(rule?.http?.paths)) {
+          rule.http.paths.forEach((pathObj: any) => {
+            if (pathObj?.backend?.service?.name) backendRefs.push(pathObj.backend.service.name);
+          });
+        }
+      });
+      if (ingressDoc?.spec?.defaultBackend?.service?.name) backendRefs.push(ingressDoc.spec.defaultBackend.service.name);
+      const uniqueBackendRefs = Array.from(new Set(backendRefs));
+      uniqueBackendRefs.forEach((serviceName) => {
+        const serviceExists = manifest.services.some((service) => getResourceName(service) === serviceName && getResourceNamespace(service) === getResourceNamespace(ingressDoc));
+        if (!serviceExists) {
+          resource.checks.push({
+            title: "Ingress backend service",
+            severity: "warning",
+            description: `Ingress ${resource.name} in namespace ${resource.namespace} references Service ${serviceName}, but the referenced Service was not found in the supplied manifest.`,
+            recommendation: "Verify that the Ingress backend service exists in the supplied manifest before exposing traffic through it.",
+          });
+        }
+      });
+    });
+
+    const rbacResults = resources.filter((resource) => ["Role", "ClusterRole", "RoleBinding", "ClusterRoleBinding"].includes(resource.kind));
+    rbacResults.forEach((resource) => {
+      const doc = manifest.resources.find((candidate) => getResourceName(candidate) === resource.name && getResourceNamespace(candidate) === resource.namespace && candidate.kind === resource.kind);
+      if (!doc) return;
+
+      if (resource.kind === "RoleBinding" || resource.kind === "ClusterRoleBinding") {
+        const subjects = Array.isArray(doc.subjects) ? doc.subjects : [];
+        subjects.forEach((subject: any) => {
+          if (subject?.kind === "ServiceAccount") {
+            const subjectNamespace = subject?.namespace || resource.namespace;
+            const bindingKind = resource.kind === "ClusterRoleBinding" ? "cluster-wide" : "namespace-scoped";
+            resource.checks.push({
+              title: "ServiceAccount binding",
+              severity: resource.kind === "ClusterRoleBinding" ? "warning" : "pass",
+              description: `${resource.kind} ${resource.name} binds ServiceAccount ${subject.name} in namespace ${subjectNamespace} with ${bindingKind} scope.`,
+              recommendation: "Confirm the ServiceAccount is intended to receive this access and avoid cluster-wide service account bindings unless required.",
+            });
+          }
         });
       }
     });

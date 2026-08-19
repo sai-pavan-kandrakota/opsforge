@@ -2,206 +2,515 @@
 
 import { useMemo, useState } from "react";
 
-
 type Severity = "PASS" | "WARNING" | "CRITICAL";
+type Category = "Security" | "Reliability" | "Build Efficiency" | "Governance";
 
 type Finding = {
   title: string;
   severity: Severity;
+  category: Category;
   description: string;
   recommendation?: string;
 };
 
-const exampleDockerfile = `FROM node:20
-
+const exampleDockerfile = `FROM node:20-alpine AS builder
 WORKDIR /app
-
 COPY package*.json ./
-RUN npm install
-
+RUN npm ci
 COPY . .
+RUN npm run build
 
-ENV API_KEY=example-secret
-
+FROM node:20-alpine
+WORKDIR /app
+COPY --from=builder /app/dist ./dist
+USER node
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s CMD ["node", "healthcheck.js"]
 EXPOSE 3000
+CMD ["node", "server.js"]`;
 
-CMD ["npm", "start"]`;
+function makeFinding(
+  title: string,
+  severity: Severity,
+  category: Category,
+  description: string,
+  recommendation?: string
+): Finding {
+  return { title, severity, category, description, recommendation };
+}
 
-function analyzeDockerfile(dockerfile: string): Finding[] {
+function isLikelyRuntimeVariableReference(value: string): boolean {
+  if (!value) return false;
+  const normalized = value.trim();
+  if (!normalized) return false;
+
+  return /(?:\$\{?[A-Z_][A-Z0-9_]*(?:\.[A-Z_][A-Z0-9_]*)?\}?|\$\w+|\$\{[^}]+\}|var\.|local\.|data\.|file\(|secretmanager|secretsmanager|aws_ssm_parameter|ssm:|vault:|env\.|\${\w+})/i.test(
+    normalized
+  );
+}
+
+function isLikelySensitiveKey(key: string): boolean {
+  return /(password|passwd|passphrase|token|api[_-]?key|access[_-]?key|secret[_-]?key|private[_-]?key|client[_-]?secret|secret|credentials?|aws_secret_access_key|aws_access_key_id)/i.test(
+    key
+  );
+}
+
+function isLikelyLiteralSecret(value: string): boolean {
+  if (!value) return false;
+  const trimmed = value.trim().replace(/^['"]|['"]$/g, "");
+
+  if (!trimmed || trimmed === "${" || trimmed.startsWith("$") || trimmed.includes("${")) {
+    return false;
+  }
+
+  if (
+    /(?:secretmanager|secretsmanager|aws_ssm_parameter|ssm:|vault:|file\(|\$\{?\w+\}?)/i.test(
+      trimmed
+    )
+  ) {
+    return false;
+  }
+
+  if (/BEGIN (?:RSA |OPENSSH |EC )?PRIVATE KEY/i.test(trimmed)) {
+    return true;
+  }
+
+  if (/AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}/.test(trimmed)) {
+    return true;
+  }
+
+  if (/\b(?:password|token|secret|api[_-]?key|access[_-]?key|private[_-]?key|client[_-]?secret)\s*[:=]/i.test(trimmed)) {
+    return true;
+  }
+
+  return trimmed.length >= 8 && /[A-Za-z0-9_\-+/=]{8,}/.test(trimmed);
+}
+
+function detectMalformedDockerfile(dockerfile: string): boolean {
+  const trimmed = dockerfile.trim();
+  if (!trimmed) return true;
+
+  const openBrackets = (trimmed.match(/\[/g) || []).length;
+  const closeBrackets = (trimmed.match(/\]/g) || []).length;
+  const openBraces = (trimmed.match(/\{/g) || []).length;
+  const closeBraces = (trimmed.match(/\}/g) || []).length;
+  const openParens = (trimmed.match(/\(/g) || []).length;
+  const closeParens = (trimmed.match(/\)/g) || []).length;
+  const doubleQuotes = (trimmed.match(/"/g) || []).length;
+  const singleQuotes = (trimmed.match(/'/g) || []).length;
+
+  if (
+    openBrackets !== closeBrackets ||
+    openBraces !== closeBraces ||
+    openParens !== closeParens ||
+    doubleQuotes % 2 !== 0 ||
+    singleQuotes % 2 !== 0
+  ) {
+    return true;
+  }
+
+  const likelyIncompleteRun = /\bRUN\b.*(?:&&\s*|\\)\s*$/.test(trimmed);
+  return likelyIncompleteRun;
+}
+
+export function analyzeDockerfile(dockerfile: string): Finding[] {
   const findings: Finding[] = [];
-  const lines = dockerfile.split("\n");
+  const text = dockerfile || "";
+  const normalized = text.trim();
+  const lines = text.split(/\r?\n/);
 
-  const hasFrom = /^\s*FROM\s+/im.test(dockerfile);
-  const hasUser = /^\s*USER\s+/im.test(dockerfile);
-  const hasHealthcheck = /^\s*HEALTHCHECK\s+/im.test(dockerfile);
-  const hasCopy = /^\s*COPY\s+/im.test(dockerfile);
-  const hasAdd = /^\s*ADD\s+/im.test(dockerfile);
-  const hasRun = /^\s*RUN\s+/im.test(dockerfile);
-  const hasMultiStage = /^\s*FROM\s+.+\s+AS\s+/im.test(dockerfile);
-  const hasAptInstall = /apt-get\s+install/i.test(dockerfile);
-  const hasAptCleanup =
-    /rm\s+-rf\s+\/var\/lib\/apt\/lists/i.test(dockerfile);
-  const hasSecret =
-    /^\s*(ENV|ARG)\s+[A-Z0-9_]*(KEY|TOKEN|SECRET|PASSWORD)[A-Z0-9_]*/im.test(
-      dockerfile
+  if (!normalized) {
+    findings.push(
+      makeFinding(
+        "Empty Dockerfile",
+        "WARNING",
+        "Governance",
+        "The supplied Dockerfile is empty. There is no content to review.",
+        "Add the Dockerfile instructions needed to build the image and then rerun analysis."
+      )
     );
+    return findings;
+  }
 
-  const fromMatches = [
-    ...dockerfile.matchAll(/^\s*FROM\s+([^\s]+)(?:\s+AS\s+\S+)?/gim),
-  ];
+  if (detectMalformedDockerfile(text)) {
+    findings.push(
+      makeFinding(
+        "Dockerfile appears malformed",
+        "WARNING",
+        "Governance",
+        "Unable to fully verify this Dockerfile from the supplied content because it appears incomplete or malformed.",
+        "Review missing instruction terminators, unbalanced quotes, or incomplete shell commands before building the image."
+      )
+    );
+  }
 
-  const usesLatest = fromMatches.some((match) => {
-    const image = match[1];
-    return image.endsWith(":latest") || !image.includes(":");
-  });
+  const fromMatches = [...text.matchAll(/^\s*FROM\s+(?:--platform=\S+\s+)?([^\s]+)(?:\s+AS\s+\S+)?/gim)];
+  const hasFrom = fromMatches.length > 0;
+  const hasUser = /^\s*USER\s+/im.test(text);
+  const hasHealthcheck = /^\s*HEALTHCHECK\s+/im.test(text);
+  const hasCopy = /^\s*COPY\s+/im.test(text);
+  const hasAdd = /^\s*ADD\s+/im.test(text);
+  const hasRun = /^\s*RUN\s+/im.test(text);
+  const hasMultiStage = /^\s*FROM\s+.+\s+AS\s+/im.test(text);
+  const hasWorkdir = /^\s*WORKDIR\s+/im.test(text);
+  const hasEntrypoint = /^\s*(?:ENTRYPOINT|CMD)\s+/im.test(text);
+  const runCount = lines.filter((line) => /^\s*RUN\s+/i.test(line)).length;
+
+  const firstFromImage = fromMatches[0]?.[1]?.trim() || "";
+  const hasPinnedVersion = /:(\d+|\d+\.\d+|\d+\.\d+\.\d+)|@sha256:/i.test(firstFromImage);
+  const hasLatestTag = /:latest\b/i.test(firstFromImage) || (!/[:@]/.test(firstFromImage) && !/^\$/.test(firstFromImage));
+  const isMinimalImage = /(?:distroless|slim|alpine|minimal)/i.test(firstFromImage);
 
   if (!hasFrom) {
-    findings.push({
-      title: "Missing FROM instruction",
-      severity: "CRITICAL",
-      description: "No base image was found in the Dockerfile.",
-      recommendation: "Add a FROM instruction using a trusted, pinned base image.",
-    });
+    findings.push(
+      makeFinding(
+        "Missing FROM instruction",
+        "CRITICAL",
+        "Security",
+        "No base image was found in the Dockerfile.",
+        "Add a trusted base image before attempting to build or deploy this artifact."
+      )
+    );
   } else {
-    findings.push({
-      title: "Base image configured",
-      severity: "PASS",
-      description: "A Docker base image is defined.",
-    });
+    if (hasLatestTag || !hasPinnedVersion) {
+      findings.push(
+        makeFinding(
+          "Base image tag is mutable or unpinned",
+          "WARNING",
+          "Security",
+          isMinimalImage
+            ? "The Dockerfile uses a minimal base image, which is generally favorable, but it is not pinned to a specific tag or digest."
+            : "The base image is not pinned to a specific tag or digest, which increases drift and makes rebuilds less deterministic.",
+          "Use a version-pinned base image or digest, for example node:20.19.4 or a stable image digest."
+        )
+      );
+    } else {
+      findings.push(
+        makeFinding(
+          "Base image is version pinned",
+          "PASS",
+          "Security",
+          "The Dockerfile uses an explicit base image tag or digest.",
+          "Continue using pinned images to improve reproducibility and reduce unexpected upstream changes."
+        )
+      );
+    }
   }
 
-  if (usesLatest) {
-    findings.push({
-      title: "Mutable base image tag",
-      severity: "WARNING",
-      description:
-        "The Dockerfile uses an unpinned image or the mutable latest tag.",
-      recommendation:
-        "Use a specific version or digest, for example node:20.19.4 or an image digest.",
-    });
-  } else if (hasFrom) {
-    findings.push({
-      title: "Base image version pinned",
-      severity: "PASS",
-      description: "The base image uses an explicit version tag.",
-    });
-  }
-
-  if (hasSecret) {
-    findings.push({
-      title: "Potential secret in ENV/ARG",
-      severity: "CRITICAL",
-      description:
-        "An ENV or ARG variable appears to contain a key, token, secret, or password.",
-      recommendation:
-        "Never bake secrets into Docker images. Inject secrets at runtime using your platform's secret-management mechanism.",
-    });
-  } else {
-    findings.push({
-      title: "No obvious embedded secrets",
-      severity: "PASS",
-      description:
-        "No obvious secret-like ENV or ARG variables were detected.",
-    });
-  }
+  const userInstructions = [...text.matchAll(/^\s*USER\s+([^\s]+).*$/gim)].map((match) => match[1].trim());
+  const lastUser = userInstructions[userInstructions.length - 1] || "";
 
   if (!hasUser) {
-    findings.push({
-      title: "Container may run as root",
-      severity: "WARNING",
-      description: "No USER instruction was found.",
-      recommendation:
-        "Create and use a non-root application user whenever possible.",
-    });
+    findings.push(
+      makeFinding(
+        "No USER instruction configured",
+        "WARNING",
+        "Security",
+        "The Dockerfile does not explicitly set a non-root user.",
+        "Add a dedicated non-root user and switch the runtime to that user with USER."
+      )
+    );
+  } else if (/^(?:root|0|0:0|root:root)$/i.test(lastUser)) {
+    findings.push(
+      makeFinding(
+        "Container runs as root",
+        "CRITICAL",
+        "Security",
+        "The Dockerfile sets the runtime user to root, which increases the blast radius of a container compromise.",
+        "Run the image as a non-root user, such as USER appuser or USER 1000:1000."
+      )
+    );
   } else {
-    findings.push({
-      title: "Non-root user configured",
-      severity: "PASS",
-      description: "A USER instruction was detected.",
-    });
+    findings.push(
+      makeFinding(
+        "Non-root user configured",
+        "PASS",
+        "Security",
+        "The Dockerfile uses a non-root USER declaration.",
+        "Keep the runtime user non-root to reduce privilege escalation risk."
+      )
+    );
   }
 
-  if (!hasHealthcheck) {
-    findings.push({
-      title: "Healthcheck missing",
-      severity: "WARNING",
-      description: "No HEALTHCHECK instruction was found.",
-      recommendation:
-        "Add a healthcheck where appropriate so container orchestration can detect unhealthy containers.",
-    });
+  if (/--privileged|--cap-add\s*=\s*(?:ALL|SYS_ADMIN|NET_ADMIN|SYS_PTRACE|DAC_READ_SEARCH|SYS_MODULE)|--security-opt\s*=\s*seccomp:unconfined/i.test(text)) {
+    findings.push(
+      makeFinding(
+        "Privileged container configuration detected",
+        "CRITICAL",
+        "Security",
+        "The Dockerfile or container command includes privileged or highly permissive runtime configuration.",
+        "Avoid privileged mode and reduce Linux capabilities unless there is a specific operational need."
+      )
+    );
+  }
+
+  if (/\/var\/run\/docker\.sock|docker\.sock|\/var\/run\/podman\.sock/i.test(text)) {
+    findings.push(
+      makeFinding(
+        "Docker socket exposure",
+        "CRITICAL",
+        "Security",
+        "The Dockerfile references a host Docker socket, which can expose the host runtime to a container with broad control.",
+        "Remove the Docker socket mount unless the workload requires it and use a restricted orchestration interface instead."
+      )
+    );
+  }
+
+  if (/openssh-server|sshd|service\s+ssh|ssh\s+start|apt-get\s+install\s+.*ssh|apk\s+add\s+.*openssh/i.test(text)) {
+    findings.push(
+      makeFinding(
+        "SSH server is installed or started",
+        "WARNING",
+        "Security",
+        "The Dockerfile appears to install or enable SSH, which increases attack surface and may not be necessary in a production container image.",
+        "Prefer a minimal runtime image and use your platform's secure access model instead of exposing SSH inside the container."
+      )
+    );
+  }
+
+  if (/\bsudo\b/i.test(text)) {
+    findings.push(
+      makeFinding(
+        "Sudo usage detected",
+        "WARNING",
+        "Security",
+        "The Dockerfile uses sudo, which can obscure least-privilege boundaries and encourages unnecessary root-like behavior.",
+        "Prefer direct non-root execution or explicit least-privilege user and group configuration."
+      )
+    );
+  }
+
+  const secretLines: string[] = [];
+  for (const line of lines) {
+    const envMatch = /^\s*(?:ARG|ENV)\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/.exec(line);
+    if (envMatch) {
+      const [, key, value] = envMatch;
+      const cleaned = value.trim().replace(/^['"]|['"]$/g, "");
+      if (isLikelySensitiveKey(key) && !isLikelyRuntimeVariableReference(cleaned) && isLikelyLiteralSecret(cleaned)) {
+        secretLines.push(`${key}=${cleaned}`);
+      }
+      continue;
+    }
+
+    const runMatch = /(?:password|passwd|passphrase|token|api[_-]?key|access[_-]?key|secret[_-]?key|private[_-]?key|client[_-]?secret|aws_secret_access_key|aws_access_key_id|credentials?)[\s:=]+['"]?([^'"\s]+)['"]?/i.exec(line);
+    if (runMatch && !isLikelyRuntimeVariableReference(runMatch[1])) {
+      const candidate = runMatch[1].trim();
+      if (candidate && candidate.length >= 6 && !/^(?:\$|\{)/.test(candidate)) {
+        secretLines.push(candidate);
+      }
+    }
+
+    if (/AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}/.test(line)) {
+      secretLines.push("AWS access key literal");
+    }
+
+    if (/BEGIN (?:RSA |OPENSSH |EC )?PRIVATE KEY/i.test(line)) {
+      secretLines.push("private key literal");
+    }
+  }
+
+  if (secretLines.length > 0) {
+    findings.push(
+      makeFinding(
+        "Hardcoded secret detected",
+        "CRITICAL",
+        "Security",
+        "The Dockerfile contains a literal secret or credential value that appears to be embedded in the image.",
+        "Use runtime secret injection, external secret managers, or build arguments that are provided at deploy time rather than hardcoding credentials in the Dockerfile."
+      )
+    );
   } else {
-    findings.push({
-      title: "Healthcheck configured",
-      severity: "PASS",
-      description: "A Docker HEALTHCHECK instruction was detected.",
-    });
+    findings.push(
+      makeFinding(
+        "No obvious hardcoded secrets",
+        "PASS",
+        "Security",
+        "No obvious literal credentials were detected in ENV, ARG, or RUN instructions.",
+        "Keep secrets outside the Dockerfile and prefer secret-manager integrations or runtime injection."
+      )
+    );
   }
 
-  if (hasAdd) {
-    findings.push({
-      title: "ADD instruction detected",
-      severity: "WARNING",
-      description:
-        "ADD was found in the Dockerfile. It has additional behavior beyond copying files.",
-      recommendation:
-        "Prefer COPY unless you specifically need ADD functionality such as extracting a local archive.",
-    });
-  } else if (hasCopy) {
-    findings.push({
-      title: "COPY used for files",
-      severity: "PASS",
-      description: "COPY is used for transferring application files.",
-    });
+  const aptInstall = /apt-get\s+(?:install|update)/i.test(text);
+  const aptUpgrade = /apt-get\s+(?:upgrade|dist-upgrade)/i.test(text);
+  const apkInstall = /apk\s+add/i.test(text);
+  const yumInstall = /yum\s+install/i.test(text);
+  const aptCleanup = /rm\s+-rf\s+\/var\/lib\/apt\/lists|apt-get\s+clean|apt-get\s+autoremove/i.test(text);
+  const apkCleanup = /rm\s+-rf\s+\/var\/cache\/apk|apk\s+cache\s+clean/i.test(text);
+  const yumCleanup = /yum\s+clean\s+all|rm\s+-rf\s+\/var\/cache\/yum/i.test(text);
+
+  if (aptInstall || apkInstall || yumInstall) {
+    const cleanupSeen = aptCleanup || apkCleanup || yumCleanup;
+    if (!cleanupSeen) {
+      findings.push(
+        makeFinding(
+          "Package cache cleanup is missing",
+          "WARNING",
+          "Build Efficiency",
+          "A package installation step was detected without cleanup of package caches or apt lists.",
+          "Clean package manager caches in the same layer to keep the image smaller and reduce unnecessary build artifacts."
+        )
+      );
+    } else {
+      findings.push(
+        makeFinding(
+          "Package cache cleanup present",
+          "PASS",
+          "Build Efficiency",
+          "Package manager caches or package lists are being cleaned up after installation.",
+          "Continue to keep package caches out of the final image to improve efficiency."
+        )
+      );
+    }
   }
 
-  if (hasAptInstall && !hasAptCleanup) {
-    findings.push({
-      title: "APT cache cleanup missing",
-      severity: "WARNING",
-      description:
-        "apt-get install was detected without cleanup of the package lists.",
-      recommendation:
-        "Clean /var/lib/apt/lists in the same RUN layer to reduce image size.",
-    });
+  if (aptUpgrade) {
+    findings.push(
+      makeFinding(
+        "Apt upgrade or dist-upgrade detected",
+        "WARNING",
+        "Security",
+        "The Dockerfile appears to upgrade packages during build rather than installing a stable, reproducible set of versions.",
+        "Prefer deterministic package installation and pin packages to known good versions where practical."
+      )
+    );
   }
 
   if (hasMultiStage) {
-    findings.push({
-      title: "Multi-stage build detected",
-      severity: "PASS",
-      description: "Multiple build stages are being used.",
-    });
+    findings.push(
+      makeFinding(
+        "Multi-stage build detected",
+        "PASS",
+        "Build Efficiency",
+        "The Dockerfile uses multiple build stages to separate compilation from the runtime artifact.",
+        "Keep this approach to reduce final image size and remove build-only dependencies."
+      )
+    );
   } else if (hasRun) {
-    findings.push({
-      title: "Multi-stage build opportunity",
-      severity: "WARNING",
-      description:
-        "The Dockerfile contains build commands but does not appear to use multiple stages.",
-      recommendation:
-        "Consider a multi-stage build to keep compilers and build dependencies out of the final image.",
-    });
+    findings.push(
+      makeFinding(
+        "Multi-stage build opportunity",
+        "WARNING",
+        "Build Efficiency",
+        "The Dockerfile contains build operations but does not appear to split the build environment from the runtime image.",
+        "Consider using a multi-stage build so compilers, package managers, and source files are not included in the final image."
+      )
+    );
   }
 
-  const runCount = lines.filter((line) =>
-    /^\s*RUN\s+/i.test(line)
-  ).length;
+  if (hasAdd) {
+    findings.push(
+      makeFinding(
+        "ADD instruction detected",
+        "WARNING",
+        "Build Efficiency",
+        "ADD is present in the Dockerfile and can introduce archive extraction or remote-fetch behavior that may be unnecessary.",
+        "Prefer COPY for local-file transfers and reserve ADD only when extracting archives or fetching remote content is actually needed."
+      )
+    );
+  } else if (hasCopy) {
+    findings.push(
+      makeFinding(
+        "COPY is used for file transfer",
+        "PASS",
+        "Build Efficiency",
+        "The Dockerfile uses COPY for file transfer, which is the safer and more explicit default.",
+        "Continue using COPY for local application files to keep the Dockerfile easier to reason about."
+      )
+    );
+  }
+
+  if (!hasWorkdir && (hasRun || hasCopy)) {
+    findings.push(
+      makeFinding(
+        "WORKDIR is missing",
+        "WARNING",
+        "Reliability",
+        "The Dockerfile contains build or copy instructions but does not declare an explicit WORKDIR.",
+        "Set a stable WORKDIR to ensure runtime commands execute in the expected filesystem location."
+      )
+    );
+  } else if (hasWorkdir) {
+    findings.push(
+      makeFinding(
+        "WORKDIR configured",
+        "PASS",
+        "Reliability",
+        "The Dockerfile declares a WORKDIR and keeps the runtime path predictable.",
+        "Keep the application working directory explicit to reduce path-related surprises."
+      )
+    );
+  }
+
+  if (!hasHealthcheck) {
+    findings.push(
+      makeFinding(
+        "Healthcheck missing",
+        "WARNING",
+        "Reliability",
+        "No HEALTHCHECK instruction was found in the Dockerfile.",
+        "Add a lightweight healthcheck where appropriate so orchestrators can detect unhealthy containers."
+      )
+    );
+  } else {
+    findings.push(
+      makeFinding(
+        "Healthcheck configured",
+        "PASS",
+        "Reliability",
+        "A HEALTHCHECK instruction is present and can help detect unhealthy container runtime states.",
+        "Keep the healthcheck lightweight, deterministic, and aligned to the application's dependency checks."
+      )
+    );
+  }
+
+  if (hasEntrypoint) {
+    findings.push(
+      makeFinding(
+        "ENTRYPOINT or CMD configured",
+        "PASS",
+        "Reliability",
+        "The Dockerfile defines an entry command for the container image.",
+        "Keep the entrypoint and default command explicit so the runtime behavior is predictable."
+      )
+    );
+  }
 
   if (runCount > 8) {
-    findings.push({
-      title: "Many RUN layers",
-      severity: "WARNING",
-      description: `The Dockerfile contains ${runCount} RUN instructions.`,
-      recommendation:
-        "Review whether related commands can safely be combined to reduce unnecessary image layers.",
-    });
-  } else {
-    findings.push({
-      title: "RUN layer count reasonable",
-      severity: "PASS",
-      description: `${runCount} RUN instruction${
-        runCount === 1 ? "" : "s"
-      } detected.`,
-    });
+    findings.push(
+      makeFinding(
+        "Many RUN instructions",
+        "WARNING",
+        "Build Efficiency",
+        `The Dockerfile contains ${runCount} RUN steps, which can create unnecessary layers and make builds harder to reason about.`,
+        "Consolidate related commands into fewer RUN instructions to reduce image size and improve layer efficiency."
+      )
+    );
+  }
+
+  const copyFromMatches = [...text.matchAll(/^\s*COPY\s+--from=\S+\s+/gim)];
+  if (copyFromMatches.length > 0) {
+    findings.push(
+      makeFinding(
+        "COPY --from is used",
+        "PASS",
+        "Build Efficiency",
+        "The Dockerfile uses COPY --from to reuse artifacts from another stage.",
+        "Keep using staged artifacts to avoid leaking build dependencies into the final image."
+      )
+    );
+  }
+
+  const suspiciousPattern = /(?:FROM\s+.*:latest|FROM\s+[^\s:]+\s*$|RUN\s+.*(?:curl|wget).*https?:\/\/|npm\s+install|pip\s+install|apk\s+add)/i.test(text);
+  if (!hasMultiStage && suspiciousPattern && hasRun) {
+    findings.push(
+      makeFinding(
+        "Build layer efficiency could be improved",
+        "WARNING",
+        "Build Efficiency",
+        "The Dockerfile includes build operations and may not be structured for efficient layer reuse or minimal runtime images.",
+        "Group related package installs together, copy dependency manifests before source code, and consider using a multi-stage build."
+      )
+    );
   }
 
   return findings;
@@ -247,7 +556,7 @@ export default function DockerfileAnalyzerPage() {
           </h1>
 
           <p className="mt-4 max-w-3xl text-zinc-400">
-            Review Dockerfiles for security, reliability, image-size, and
+            Review Dockerfiles for security, reliability, image hygiene, and
             production-readiness issues.
           </p>
         </div>
@@ -295,23 +604,9 @@ export default function DockerfileAnalyzerPage() {
 
           <section>
             <div className="grid grid-cols-3 gap-3">
-              <SummaryCard
-                label="PASSED"
-                value={passed}
-                type="pass"
-              />
-
-              <SummaryCard
-                label="WARNINGS"
-                value={warnings}
-                type="warning"
-              />
-
-              <SummaryCard
-                label="CRITICAL"
-                value={critical}
-                type="critical"
-              />
+              <SummaryCard label="PASSED" value={passed} type="pass" />
+              <SummaryCard label="WARNINGS" value={warnings} type="warning" />
+              <SummaryCard label="CRITICAL" value={critical} type="critical" />
             </div>
 
             <div className="mt-4 space-y-3">
@@ -335,17 +630,17 @@ export default function DockerfileAnalyzerPage() {
           <div className="mt-6 grid gap-4 md:grid-cols-3">
             <InfoCard
               title="Security"
-              text="Detects embedded secrets, root execution, and risky container configuration."
+              text="Detects embedded secrets, root execution, risky privileged patterns, and socket exposure."
             />
 
             <InfoCard
-              title="Image Hygiene"
-              text="Checks base-image pinning, ADD usage, layers, and build practices."
+              title="Build Efficiency"
+              text="Checks multi-stage builds, cache cleanup, COPY/ADD usage, and layer efficiency."
             />
 
             <InfoCard
-              title="Production Readiness"
-              text="Looks for healthchecks and build patterns that improve reliability."
+              title="Reliability"
+              text="Looks for healthchecks, explicit workdirs, and safer container runtime behavior."
             />
           </div>
 
@@ -353,9 +648,7 @@ export default function DockerfileAnalyzerPage() {
             <div className="font-medium text-amber-400">Important</div>
 
             <p className="mt-2 text-sm leading-6 text-zinc-400">
-              OpsForge provides practical static analysis. It does not replace
-              dedicated container security scanners, image vulnerability
-              scanners, or production testing.
+              OpsForge provides practical static analysis for the Dockerfile as supplied. It does not replace dedicated container security scanners, image vulnerability scanners, or production testing.
             </p>
           </div>
         </section>
@@ -401,10 +694,24 @@ function FindingCard({ finding }: { finding: Finding }) {
       ? "border-amber-500/40 bg-amber-950/30 text-amber-400"
       : "border-red-500/40 bg-red-950/30 text-red-400";
 
+  const categoryClass =
+    finding.category === "Security"
+      ? "text-zinc-300"
+      : finding.category === "Reliability"
+      ? "text-sky-300"
+      : finding.category === "Build Efficiency"
+      ? "text-violet-300"
+      : "text-emerald-300";
+
   return (
     <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-5">
       <div className="flex items-start justify-between gap-4">
-        <h3 className="font-medium">{finding.title}</h3>
+        <div>
+          <h3 className="font-medium">{finding.title}</h3>
+          <div className={`mt-2 text-[10px] uppercase tracking-[0.18em] ${categoryClass}`}>
+            {finding.category}
+          </div>
+        </div>
 
         <span
           className={`shrink-0 rounded-full border px-2.5 py-1 text-xs font-medium ${badgeClass}`}
@@ -413,9 +720,7 @@ function FindingCard({ finding }: { finding: Finding }) {
         </span>
       </div>
 
-      <p className="mt-3 text-sm leading-6 text-zinc-400">
-        {finding.description}
-      </p>
+      <p className="mt-3 text-sm leading-6 text-zinc-400">{finding.description}</p>
 
       {finding.recommendation && (
         <div className="mt-4 border-t border-zinc-800 pt-4">
@@ -423,9 +728,7 @@ function FindingCard({ finding }: { finding: Finding }) {
             Recommendation
           </div>
 
-          <p className="mt-2 text-sm leading-6 text-zinc-300">
-            {finding.recommendation}
-          </p>
+          <p className="mt-2 text-sm leading-6 text-zinc-300">{finding.recommendation}</p>
         </div>
       )}
     </div>
@@ -436,7 +739,6 @@ function InfoCard({ title, text }: { title: string; text: string }) {
   return (
     <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-5">
       <h3 className="font-medium">{title}</h3>
-
       <p className="mt-3 text-sm leading-6 text-zinc-400">{text}</p>
     </div>
   );

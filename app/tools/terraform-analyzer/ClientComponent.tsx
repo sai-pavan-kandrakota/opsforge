@@ -4,10 +4,12 @@ import { useMemo, useState } from "react";
 
 
 type Severity = "PASS" | "WARNING" | "CRITICAL";
+type Category = "Security" | "Reliability" | "Networking" | "Governance";
 
 type Finding = {
   title: string;
   severity: Severity;
+  category: Category;
   description: string;
   recommendation?: string;
 };
@@ -124,6 +126,469 @@ output "db_endpoint" {
   value = aws_db_instance.app.address
 }`;
 
+function getResourceBlocks(terraformText: string, resourceType: string): string[] {
+  const pattern = new RegExp(
+    `resource\\s+"${resourceType}"\\s+"[^"]+"\\s*\\{[\\s\\S]*?\\n\\s*\\}`,
+    "gim",
+  );
+  return terraformText.match(pattern) || [];
+}
+
+function isTerraformReferenceLike(value: string): boolean {
+  const normalized = value.trim();
+  if (!normalized) {
+    return true;
+  }
+
+  return (
+    normalized.startsWith("var.") ||
+    normalized.startsWith("local.") ||
+    normalized.startsWith("data.") ||
+    normalized.startsWith("module.") ||
+    normalized.includes("${") ||
+    normalized.includes("file(") ||
+    normalized.includes("sensitive(") ||
+    normalized.includes("jsondecode(") ||
+    normalized.includes("yamldecode(") ||
+    normalized.includes("aws_") ||
+    normalized.includes("random_") ||
+    normalized.includes("tls_") ||
+    normalized.includes("data.") ||
+    normalized.includes("lookup(") ||
+    normalized.includes("join(")
+  );
+}
+
+function extractLiteralValue(rawValue: string): string | null {
+  const trimmed = rawValue.trim();
+
+  if (!trimmed) {
+    return null;
+  }
+
+  if ((trimmed.startsWith('"') && trimmed.endsWith('"')) || (trimmed.startsWith("'") && trimmed.endsWith("'"))) {
+    return trimmed.slice(1, -1);
+  }
+
+  if (/^<<-?\w+/.test(trimmed)) {
+    return trimmed.replace(/^<<-?\w+/, "").trim();
+  }
+
+  return trimmed;
+}
+
+function analyzeIamPolicy(terraformText: string): Finding[] {
+  const policyResourceTypes = [
+    "aws_iam_policy",
+    "aws_iam_role_policy",
+    "aws_iam_user_policy",
+    "aws_iam_group_policy",
+  ];
+
+  const findings: Finding[] = [];
+  let sawPolicyBlock = false;
+  let wildcardAction = false;
+  let wildcardResource = false;
+  let broadAction = false;
+  const policyExamples: string[] = [];
+
+  for (const resourceType of policyResourceTypes) {
+    const blocks = getResourceBlocks(terraformText, resourceType);
+    for (const block of blocks) {
+      sawPolicyBlock = true;
+      policyExamples.push(block);
+
+      const actionMatches =
+        /(?:Action|actions)\s*=\s*["']([^"']+)["']|["']Action["']\s*:\s*["']([^"']+)["']|["']action["']\s*:\s*["']([^"']+)["']/gi;
+      const resourceMatches =
+        /(?:Resource|resources)\s*=\s*["']([^"']+)["']|["']Resource["']\s*:\s*["']([^"']+)["']|["']resource["']\s*:\s*["']([^"']+)["']/gi;
+
+      const actionText = block.match(actionMatches)?.join(" ") ?? "";
+      const resourceText = block.match(resourceMatches)?.join(" ") ?? "";
+
+      if (/(?:\*|iam:\*)/i.test(actionText)) {
+        wildcardAction = true;
+      }
+      if (/(?:\*|\[\s*"\*"\s*\]|\[\s*\*\s*\])/.test(actionText)) {
+        wildcardAction = true;
+      }
+      if (/(?:\*|\[\s*"\*"\s*\]|\[\s*\*\s*\])/.test(resourceText)) {
+        wildcardResource = true;
+      }
+      if (/iam:\*/i.test(actionText)) {
+        broadAction = true;
+      }
+    }
+  }
+
+  if (!sawPolicyBlock) {
+    return findings;
+  }
+
+  if (wildcardAction && wildcardResource) {
+    findings.push({
+      title: "IAM policy grants wildcard action and wildcard resource",
+      severity: "CRITICAL",
+      category: "Security",
+      description:
+        "The supplied Terraform contains a policy where both Action and Resource are effectively wildcarded. This is a clearly excessive permission pattern and should be reviewed carefully.",
+      recommendation:
+        "Restrict the policy to the minimum required actions and resources, and replace wildcard permissions with specific AWS actions and resource ARNs.",
+    });
+    return findings;
+  }
+
+  if (wildcardAction || wildcardResource || broadAction) {
+    findings.push({
+      title: "IAM policy contains broad wildcard permissions",
+      severity: "WARNING",
+      category: "Security",
+      description:
+        "The supplied Terraform includes wildcard IAM actions or resources, or a broad iam:* pattern. This is not automatically malicious, but it warrants review and least-privilege tightening.",
+      recommendation:
+        "Review the policy for least-privilege access and replace wildcard entries with more specific actions or resource scopes where possible.",
+    });
+  }
+
+  return findings;
+}
+
+function analyzeSecurityGroups(terraformText: string): Finding[] {
+  const findings: Finding[] = [];
+  const sgBlocks = getResourceBlocks(terraformText, "aws_security_group");
+
+  if (sgBlocks.length === 0) {
+    return findings;
+  }
+
+  const publicExposureIssues: string[] = [];
+  const criticalPorts = new Set([22, 3389, 3306, 5432, 6379, 1433, 27017, 1521]);
+
+  for (const block of sgBlocks) {
+    const ingressBlocks = block.match(/ingress\s*\{[\s\S]*?\}/gim) || [];
+
+    for (const ingressBlock of ingressBlocks) {
+      const hasPublicCidr =
+        /cidr_blocks\s*=\s*\[[\s\S]*?(?:"0\.0\.0\.0\/0"|"::\/0")[\s\S]*\]/i.test(
+          ingressBlock,
+        ) ||
+        /ipv6_cidr_blocks\s*=\s*\[[\s\S]*?"::\/0"[\s\S]*\]/i.test(ingressBlock);
+
+      if (!hasPublicCidr) {
+        continue;
+      }
+
+      const fromMatch = ingressBlock.match(/from_port\s*=\s*(\d+)/i);
+      const toMatch = ingressBlock.match(/to_port\s*=\s*(\d+)/i);
+      const fromPort = fromMatch ? Number(fromMatch[1]) : null;
+      const toPort = toMatch ? Number(toMatch[1]) : null;
+      const rangeLabel =
+        fromPort !== null && toPort !== null
+          ? `${fromPort}-${toPort}`
+          : fromPort !== null
+          ? `${fromPort}`
+          : "unknown range";
+
+      const isRangeOpen =
+        fromPort !== null && toPort !== null && (fromPort === 0 || toPort === 65535 || fromPort < toPort);
+      const hasCriticalPort =
+        fromPort !== null && toPort !== null &&
+        (criticalPorts.has(fromPort) || criticalPorts.has(toPort) ||
+          (fromPort < 65535 && toPort > 0 && (fromPort <= 22 && toPort >= 22 || fromPort <= 3389 && toPort >= 3389 || fromPort <= 3306 && toPort >= 3306 || fromPort <= 5432 && toPort >= 5432 || fromPort <= 6379 && toPort >= 6379 || fromPort <= 1433 && toPort >= 1433 || fromPort <= 27017 && toPort >= 27017 || fromPort <= 1521 && toPort >= 1521)));
+
+      if (hasCriticalPort || isRangeOpen) {
+        publicExposureIssues.push(
+          `Public ingress on ${rangeLabel} is open to 0.0.0.0/0 or ::/0.`,
+        );
+      } else {
+        publicExposureIssues.push(
+          `Public ingress on ${rangeLabel} is open to 0.0.0.0/0 or ::/0.`,
+        );
+      }
+    }
+  }
+
+  if (publicExposureIssues.length === 0) {
+    findings.push({
+      title: "No public firewall exposure detected",
+      severity: "PASS",
+      category: "Networking",
+      description:
+        "No public 0.0.0.0/0 or ::/0 ingress rules were detected in supplied aws_security_group blocks.",
+    });
+    return findings;
+  }
+
+  const highestSeverity = publicExposureIssues.some((issue) =>
+    /22|3389|3306|5432|6379|1433|27017|1521/.test(issue),
+  )
+    ? "CRITICAL"
+    : "WARNING";
+
+  findings.push({
+    title:
+      highestSeverity === "CRITICAL"
+        ? "Public SSH, RDP, or database access detected"
+        : "Public application exposure detected",
+    severity: highestSeverity,
+    category: "Networking",
+    description:
+      publicExposureIssues.length > 0
+        ? `The supplied Terraform contains public ingress rules with broad exposure: ${publicExposureIssues.join(" ")}`
+        : "Unable to fully verify this configuration from the supplied Terraform.",
+    recommendation:
+      highestSeverity === "CRITICAL"
+        ? "Restrict these ports to trusted CIDRs or private networks, and avoid exposing database or administrative services directly to the internet."
+        : "Review the exposed ports and limit ingress to trusted sources or private load balancers instead of allowing public access broadly.",
+  });
+
+  return findings;
+}
+
+function analyzeS3Buckets(terraformText: string): Finding[] {
+  const findings: Finding[] = [];
+  const s3Buckets = getResourceBlocks(terraformText, "aws_s3_bucket");
+  const s3PublicAccessBlocks = getResourceBlocks(
+    terraformText,
+    "aws_s3_bucket_public_access_block",
+  );
+
+  if (s3Buckets.length === 0) {
+    return findings;
+  }
+
+  let publicAccessPattern = false;
+  let encryptionIssue = false;
+  let versioningIssue = false;
+
+  for (const bucket of s3Buckets) {
+    if (/acl\s*=\s*["'](?:public-read|public-read-write|authenticated-read)["']/i.test(bucket)) {
+      publicAccessPattern = true;
+    }
+    if (/policy\s*=\s*.*\*.*|Principal\s*:\s*\*|aws:\s*\*|\[\s*"\*"\s*\]/i.test(bucket)) {
+      publicAccessPattern = true;
+    }
+    if (!/server_side_encryption_configuration|bucket_key_enabled|kms_master_key_id/i.test(bucket)) {
+      encryptionIssue = true;
+    }
+    if (!/versioning\s*\{[\s\S]*?enabled\s*=\s*true/i.test(bucket)) {
+      versioningIssue = true;
+    }
+  }
+
+  if (publicAccessPattern) {
+    findings.push({
+      title: "S3 bucket appears publicly accessible or broadly shared",
+      severity: "WARNING",
+      category: "Security",
+      description:
+        "The supplied Terraform includes S3 bucket ACL or policy patterns consistent with public or broadly shared access. This does not guarantee public exposure without the rest of the environment context, but it warrants review.",
+      recommendation:
+        "Remove public ACLs and public bucket policies, enable public access block settings, and restrict access to trusted principals and required actions only.",
+    });
+  }
+
+  if (s3PublicAccessBlocks.length === 0) {
+    findings.push({
+      title: "S3 public access block configuration missing",
+      severity: "WARNING",
+      category: "Security",
+      description:
+        "The supplied Terraform does not define aws_s3_bucket_public_access_block for the bucket. This does not prove the bucket is public, but it leaves the bucket without a common guardrail for public exposure.",
+      recommendation:
+        "Configure block_public_acls, block_public_policy, ignore_public_acls, and restrict_public_buckets to reduce accidental public exposure.",
+    });
+  } else {
+    const accessBlockText = s3PublicAccessBlocks.join("\n");
+    const missingAccessProtections = [
+      !/block_public_acls\s*=\s*(?:true|false)/i.test(accessBlockText),
+      !/block_public_policy\s*=\s*(?:true|false)/i.test(accessBlockText),
+      !/ignore_public_acls\s*=\s*(?:true|false)/i.test(accessBlockText),
+      !/restrict_public_buckets\s*=\s*(?:true|false)/i.test(accessBlockText),
+    ].filter(Boolean).length;
+
+    if (missingAccessProtections > 0) {
+      findings.push({
+        title: "S3 public access block is incomplete",
+        severity: "WARNING",
+        category: "Security",
+        description:
+          "The supplied Terraform includes a public access block resource, but one or more access-block protections are missing or not explicitly set.",
+        recommendation:
+          "Set all public access block flags to true to prevent accidental public bucket exposure.",
+      });
+    } else {
+      findings.push({
+        title: "S3 public access block is configured",
+        severity: "PASS",
+        category: "Security",
+        description:
+          "The supplied Terraform includes a public access block configuration with explicit public exposure protections.",
+      });
+    }
+  }
+
+  if (encryptionIssue) {
+    findings.push({
+      title: "S3 encryption may be missing",
+      severity: "WARNING",
+      category: "Security",
+      description:
+        "One or more S3 buckets appear to be missing encryption configuration. This does not prove the bucket is unencrypted in all contexts, but the supplied Terraform does not show an encryption guardrail.",
+      recommendation:
+        "Enable server-side encryption and consider KMS-managed keys for buckets handling sensitive data.",
+    });
+  }
+
+  if (versioningIssue) {
+    findings.push({
+      title: "S3 versioning may be disabled",
+      severity: "WARNING",
+      category: "Reliability",
+      description:
+        "The supplied Terraform does not show S3 bucket versioning enabled for one or more buckets.",
+      recommendation:
+        "Enable bucket versioning to improve rollback, recovery, and object overwrite protection.",
+    });
+  }
+
+  return findings;
+}
+
+function analyzeRds(terraformText: string): Finding[] {
+  const findings: Finding[] = [];
+  const dbBlocks = getResourceBlocks(terraformText, "aws_db_instance");
+
+  if (dbBlocks.length === 0) {
+    return findings;
+  }
+
+  for (const block of dbBlocks) {
+    const hasPubliclyAccessible = /publicly_accessible\s*=\s*true/i.test(block);
+    const hasPublicSecurityExposure = /cidr_blocks\s*=\s*\[[\s\S]*?(?:"0\.0\.0\.0\/0"|"::\/0")[\s\S]*\]/i.test(terraformText);
+
+    if (hasPubliclyAccessible) {
+      findings.push({
+        title: "RDS instance is publicly accessible",
+        severity: hasPublicSecurityExposure ? "CRITICAL" : "WARNING",
+        category: "Security",
+        description: hasPublicSecurityExposure
+          ? "The supplied Terraform sets publicly_accessible = true and also exposes a public ingress path in the same configuration, making public database exposure plausible."
+          : "The supplied Terraform sets publicly_accessible = true. This does not prove a public security group rule is present, but it indicates a public database configuration that needs review.",
+        recommendation:
+          "Keep the database private unless there is a clear operational reason for public access, and restrict it to trusted networks or private endpoints.",
+      });
+    }
+
+    if (/storage_encrypted\s*=\s*false/i.test(block) || !/storage_encrypted\s*=/.test(block)) {
+      findings.push({
+        title: "RDS encryption is not explicitly enabled",
+        severity: "WARNING",
+        category: "Security",
+        description:
+          "The supplied Terraform does not clearly show RDS storage encryption enabled. This is not always a vulnerability, but it is a common production-hardening requirement.",
+        recommendation:
+          "Set storage_encrypted = true for database instances that hold sensitive or regulated data.",
+      });
+    }
+
+    if (/backup_retention_period\s*=\s*0/i.test(block) || !/backup_retention_period\s*=/.test(block)) {
+      findings.push({
+        title: "RDS backup retention may be insufficient",
+        severity: "WARNING",
+        category: "Reliability",
+        description:
+          "The supplied Terraform does not clearly show an appropriate backup retention period for the database instance.",
+        recommendation:
+          "Set a non-zero backup_retention_period to support recovery and operational resilience.",
+      });
+    }
+
+    if (/deletion_protection\s*=\s*false/i.test(block) || !/deletion_protection\s*=/.test(block)) {
+      findings.push({
+        title: "RDS deletion protection is not explicitly enabled",
+        severity: "WARNING",
+        category: "Reliability",
+        description:
+          "The supplied Terraform does not clearly enable deletion protection for the database. This may be acceptable for non-production workloads, but it is a common production safeguard.",
+        recommendation:
+          "Set deletion_protection = true for production databases unless there is a deliberate operational exception.",
+      });
+    }
+  }
+
+  return findings;
+}
+
+function analyzeSensitiveVariables(terraformText: string): Finding[] {
+  const findings: Finding[] = [];
+  const variableBlocks = terraformText.match(/variable\s+"[^"]+"\s*\{[\s\S]*?\}/gim) || [];
+
+  for (const block of variableBlocks) {
+    const nameMatch = block.match(/variable\s+"([^"]+)"/i);
+    const variableName = nameMatch ? nameMatch[1] : "";
+    const loweredName = variableName.toLowerCase();
+    const isSensitiveName =
+      /password|secret|token|key|api_key|client_secret|private_key|credential/i.test(loweredName);
+    const isMarkedSensitive = /sensitive\s*=\s*true/i.test(block);
+    const hasLiteralDefault = /default\s*=\s*["'][^"']+["']/i.test(block);
+
+    if (isSensitiveName && !isMarkedSensitive && hasLiteralDefault) {
+      findings.push({
+        title: `Sensitive variable should be marked sensitive: ${variableName}`,
+        severity: "WARNING",
+        category: "Security",
+        description:
+          "A variable whose name suggests it contains secrets or credentials appears to be defined without sensitive = true.",
+        recommendation:
+          "Add sensitive = true to the variable declaration so Terraform does not display it in plans and UI output.",
+      });
+    }
+  }
+
+  const literalSecretLines = terraformText
+    .split(/\r?\n/)
+    .filter((line) => /(?:password|secret|token|access_key|secret_key|api_key|private_key|client_secret|db_password)/i.test(line));
+
+  for (const line of literalSecretLines) {
+    const match = line.match(/([A-Za-z0-9_]*(?:password|secret|token|access_key|secret_key|api_key|private_key|client_secret|db_password)[A-Za-z0-9_]*)\s*=\s*(.+)/i);
+    if (!match) continue;
+
+    const [, key, rawValue] = match;
+    const trimmedValue = rawValue.trim();
+    const literalValue = extractLiteralValue(trimmedValue);
+
+    if (
+      !literalValue ||
+      !literalValue.length ||
+      isTerraformReferenceLike(literalValue) ||
+      literalValue === "null" ||
+      literalValue === "true" ||
+      literalValue === "false"
+    ) {
+      continue;
+    }
+
+    const lowerKey = key.toLowerCase();
+    const sensitiveName = /password|secret|token|access_key|secret_key|api_key|private_key|client_secret|db_password/.test(lowerKey);
+
+    if (sensitiveName) {
+      findings.push({
+        title: `Hardcoded secret value detected: ${key}`,
+        severity: "CRITICAL",
+        category: "Security",
+        description:
+          "The supplied Terraform contains a literal secret-like value assigned to a sensitive field. This is a high-risk configuration pattern unless the value is being sourced from a secure external reference.",
+        recommendation:
+          "Move the value to a secret manager, environment variable, or Terraform variable marked sensitive = true instead of hardcoding the value in the configuration.",
+      });
+      break;
+    }
+  }
+
+  return findings;
+}
+
 function analyzeTerraform(terraformText: string): Finding[] {
   const findings: Finding[] = [];
   const normalized = terraformText.trim();
@@ -132,6 +597,7 @@ function analyzeTerraform(terraformText: string): Finding[] {
     findings.push({
       title: "Empty Terraform configuration",
       severity: "CRITICAL",
+      category: "Security",
       description: "No Terraform configuration was provided.",
       recommendation:
         "Paste a Terraform file or module definition before running the analyzer.",
@@ -140,22 +606,24 @@ function analyzeTerraform(terraformText: string): Finding[] {
   }
 
   const blockPattern =
-    /\b(?:resource|variable|module|provider|data|locals|terraform)\b/gi;
+    /\b(?:resource|variable|module|provider|data|locals|terraform|output)\b/gi;
   const hasTerraformBlocks = blockPattern.test(terraformText);
 
   if (!hasTerraformBlocks) {
     findings.push({
       title: "Terraform structure not recognized",
       severity: "CRITICAL",
+      category: "Governance",
       description:
         "The input does not appear to contain recognizable Terraform blocks.",
       recommendation:
-        "Use standard Terraform blocks such as resource, variable, provider, module, data, locals, or terraform.",
+        "Use standard Terraform blocks such as resource, variable, provider, module, data, locals, terraform, or output.",
     });
   } else {
     findings.push({
       title: "Terraform blocks detected",
       severity: "PASS",
+      category: "Governance",
       description: "The configuration contains recognizable Terraform blocks.",
     });
   }
@@ -202,6 +670,7 @@ function analyzeTerraform(terraformText: string): Finding[] {
     findings.push({
       title: "Hardcoded secret detected",
       severity: "CRITICAL",
+      category: "Security",
       description:
         "The configuration appears to embed secrets directly in Terraform values.",
       recommendation:
@@ -211,6 +680,7 @@ function analyzeTerraform(terraformText: string): Finding[] {
     findings.push({
       title: "No obvious hardcoded secrets",
       severity: "PASS",
+      category: "Security",
       description:
         "No obvious inline secret values were detected in Terraform assignments.",
     });
@@ -222,6 +692,7 @@ function analyzeTerraform(terraformText: string): Finding[] {
     findings.push({
       title: "AWS access key pattern detected",
       severity: "CRITICAL",
+      category: "Security",
       description:
         "A literal AWS access key pattern was found in the Terraform configuration.",
       recommendation:
@@ -231,6 +702,7 @@ function analyzeTerraform(terraformText: string): Finding[] {
     findings.push({
       title: "AWS credential handling not obviously hardcoded",
       severity: "PASS",
+      category: "Security",
       description:
         "No obvious literal AWS access-key patterns were found in the Terraform input.",
     });
@@ -245,6 +717,7 @@ function analyzeTerraform(terraformText: string): Finding[] {
     findings.push({
       title: "Public network exposure detected",
       severity: sshOrRdpOpen ? "CRITICAL" : "WARNING",
+      category: "Networking",
       description:
         "The Terraform configuration exposes services to the public internet or broad CIDR ranges.",
       recommendation:
@@ -254,6 +727,7 @@ function analyzeTerraform(terraformText: string): Finding[] {
     findings.push({
       title: "Public ingress not obviously exposed",
       severity: "PASS",
+      category: "Networking",
       description:
         "No obvious public ingress rules such as 0.0.0.0/0 were detected.",
     });
@@ -292,6 +766,7 @@ function analyzeTerraform(terraformText: string): Finding[] {
     findings.push({
       title: "Encryption safeguards may be missing",
       severity: "WARNING",
+      category: "Security",
       description:
         "One or more AWS resources appear to be missing standard encryption configuration.",
       recommendation:
@@ -301,6 +776,7 @@ function analyzeTerraform(terraformText: string): Finding[] {
     findings.push({
       title: "Encryption requirements appear covered",
       severity: "PASS",
+      category: "Security",
       description:
         "No obvious missing-encryption patterns were identified in common AWS resource blocks.",
     });
@@ -312,6 +788,7 @@ function analyzeTerraform(terraformText: string): Finding[] {
     findings.push({
       title: "S3 public access style issue",
       severity: "WARNING",
+      category: "Security",
       description:
         "The configuration appears to configure S3 bucket access in a public or broadly shared way.",
       recommendation:
@@ -321,6 +798,7 @@ function analyzeTerraform(terraformText: string): Finding[] {
     findings.push({
       title: "S3 access policy not obviously public",
       severity: "PASS",
+      category: "Security",
       description:
         "No obvious public ACL or public access policy pattern was detected for S3 resources.",
     });
@@ -341,6 +819,7 @@ function analyzeTerraform(terraformText: string): Finding[] {
     findings.push({
       title: "Hardcoded environment-specific values",
       severity: "WARNING",
+      category: "Governance",
       description:
         "The Terraform config contains environment-specific configuration values that are often better handled by variables or separate environment tiers.",
       recommendation:
@@ -350,6 +829,7 @@ function analyzeTerraform(terraformText: string): Finding[] {
     findings.push({
       title: "Environment configuration appears parameterized",
       severity: "PASS",
+      category: "Governance",
       description:
         "No obvious hardcoded environment-specific values were detected.",
     });
@@ -364,6 +844,7 @@ function analyzeTerraform(terraformText: string): Finding[] {
     findings.push({
       title: "Provider version constraints are present",
       severity: "PASS",
+      category: "Governance",
       description:
         "Terraform provider versions appear to be constrained or pinned.",
     });
@@ -371,6 +852,7 @@ function analyzeTerraform(terraformText: string): Finding[] {
     findings.push({
       title: "Provider version pinning missing",
       severity: "WARNING",
+      category: "Governance",
       description:
         "The provider block exists, but no obvious version constraint is configured.",
       recommendation:
@@ -380,6 +862,7 @@ function analyzeTerraform(terraformText: string): Finding[] {
     findings.push({
       title: "Provider configuration not detected",
       severity: "WARNING",
+      category: "Governance",
       description:
         "No provider block was found. This may be acceptable in modules, but it is worth confirming provider intent.",
       recommendation:
@@ -417,6 +900,7 @@ function analyzeTerraform(terraformText: string): Finding[] {
     findings.push({
       title: "AWS resource tagging is inconsistent",
       severity: "WARNING",
+      category: "Governance",
       description:
         "Some AWS resources do not appear to define tags, which is often expected for ownership, cost, and governance.",
       recommendation:
@@ -426,6 +910,7 @@ function analyzeTerraform(terraformText: string): Finding[] {
     findings.push({
       title: "Resource tagging appears present",
       severity: "PASS",
+      category: "Governance",
       description:
         "Tagged AWS resources were detected in the configuration.",
     });
@@ -436,6 +921,7 @@ function analyzeTerraform(terraformText: string): Finding[] {
     findings.push({
       title: "Remote backend configured",
       severity: "PASS",
+      category: "Governance",
       description:
         "A remote backend block was detected, which is better for team collaboration and state management.",
     });
@@ -443,6 +929,7 @@ function analyzeTerraform(terraformText: string): Finding[] {
     findings.push({
       title: "No remote backend configured",
       severity: "WARNING",
+      category: "Governance",
       description:
         "No backend block was found. Local state may be unsuitable for shared or production environments.",
       recommendation:
@@ -455,18 +942,26 @@ function analyzeTerraform(terraformText: string): Finding[] {
     findings.push({
       title: "Outputs defined",
       severity: "PASS",
+      category: "Governance",
       description: `Terraform output blocks were detected (${outputBlocks.length}).`,
     });
   } else {
     findings.push({
       title: "Outputs not defined",
       severity: "WARNING",
+      category: "Governance",
       description:
         "No output blocks were detected. Outputs make critical values easier to share and consume.",
       recommendation:
         "Add outputs for important values such as resource IDs, endpoints, and connection details.",
     });
   }
+
+  findings.push(...analyzeIamPolicy(terraformText));
+  findings.push(...analyzeSecurityGroups(terraformText));
+  findings.push(...analyzeS3Buckets(terraformText));
+  findings.push(...analyzeRds(terraformText));
+  findings.push(...analyzeSensitiveVariables(terraformText));
 
   return findings;
 }
@@ -648,7 +1143,12 @@ function FindingCard({ finding }: { finding: Finding }) {
   return (
     <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-5">
       <div className="flex items-start justify-between gap-4">
-        <h3 className="font-medium">{finding.title}</h3>
+        <div>
+          <h3 className="font-medium">{finding.title}</h3>
+          <div className="mt-1 text-[10px] uppercase tracking-[0.18em] text-zinc-500">
+            {finding.category}
+          </div>
+        </div>
 
         <span
           className={`shrink-0 rounded-full border px-2.5 py-1 text-xs font-medium ${badgeClass}`}

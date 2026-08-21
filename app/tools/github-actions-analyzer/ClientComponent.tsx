@@ -121,6 +121,8 @@ function parseWorkflowYaml(yamlText: string): WorkflowDocument | null {
 }
 
 function analyzeGitHubActionsWorkflow(rawYaml: string): Finding[] {
+  rawYaml = rawYaml || "";
+
   const findings: Finding[] = [];
   const trimmed = rawYaml.trim();
 
@@ -587,10 +589,23 @@ export default function GitHubActionsAnalyzerPage() {
   const [workflow, setWorkflow] = useState(exampleWorkflow);
   const [analyzed, setAnalyzed] = useState(true);
 
-  const findings = useMemo(
-    () => (analyzed ? analyzeGitHubActionsWorkflow(workflow) : []),
-    [workflow, analyzed],
-  );
+  const { findings, analysisError } = useMemo(() => {
+    if (!analyzed) {
+      return { findings: [] as Finding[], analysisError: null as string | null };
+    }
+
+    try {
+      return { findings: analyzeGitHubActionsWorkflow(workflow), analysisError: null as string | null };
+    } catch (error) {
+      return {
+        findings: [] as Finding[],
+        analysisError:
+          error instanceof Error
+            ? error.message
+            : "Unexpected error while analyzing this workflow.",
+      };
+    }
+  }, [workflow, analyzed]);
 
   const passed = findings.filter((finding) => finding.severity === "PASS").length;
   const warnings = findings.filter((finding) => finding.severity === "WARNING").length;
@@ -670,18 +685,28 @@ export default function GitHubActionsAnalyzerPage() {
           </section>
 
           <section>
-            <div className="grid grid-cols-3 gap-3">
-              <SummaryCard label="PASSED" value={passed} type="pass" />
-              <SummaryCard label="WARNINGS" value={warnings} type="warning" />
-              <SummaryCard label="CRITICAL" value={critical} type="critical" />
-            </div>
+            {analysisError ? (
+              <div className="rounded-xl border border-red-900/60 bg-red-950/20 p-5">
+                <p className="font-medium text-red-400">Analysis failed</p>
+                <p className="mt-2 break-all font-mono text-sm text-red-300/80">{analysisError}</p>
+                <p className="mt-3 text-sm text-zinc-400">
+                  This does not mean the workflow is safe — the analyzer could not complete. Adjust the input and try again.
+                </p>
+              </div>
+            ) : (
+              <div className="grid grid-cols-3 gap-3">
+                <SummaryCard label="PASSED" value={passed} type="pass" />
+                <SummaryCard label="WARNINGS" value={warnings} type="warning" />
+                <SummaryCard label="CRITICAL" value={critical} type="critical" />
+              </div>
+            )}
 
             <div className="mt-4 space-y-3">
               {!analyzed ? (
                 <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-6 text-sm text-zinc-400">
                   Paste a workflow and click <span className="text-white">Analyze Workflow</span>.
                 </div>
-              ) : findings.length === 0 ? (
+              ) : analysisError ? null : findings.length === 0 ? (
                 <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-6 text-sm text-zinc-400">
                   No findings available.
                 </div>

@@ -1261,6 +1261,8 @@ function hasObviousTerraformSyntaxIssue(terraformText: string): boolean {
 }
 
 function analyzeTerraform(terraformText: string): Finding[] {
+  terraformText = terraformText || "";
+
   const findings: Finding[] = [];
   const normalized = terraformText.trim();
 
@@ -1566,10 +1568,23 @@ export default function TerraformAnalyzerPage() {
   const [terraform, setTerraform] = useState(exampleTerraform);
   const [analyzed, setAnalyzed] = useState(true);
 
-  const findings = useMemo(
-    () => (analyzed ? analyzeTerraform(terraform) : []),
-    [terraform, analyzed],
-  );
+  const { findings, analysisError } = useMemo(() => {
+    if (!analyzed) {
+      return { findings: [] as Finding[], analysisError: null as string | null };
+    }
+
+    try {
+      return { findings: analyzeTerraform(terraform), analysisError: null as string | null };
+    } catch (error) {
+      return {
+        findings: [] as Finding[],
+        analysisError:
+          error instanceof Error
+            ? error.message
+            : "Unexpected error while analyzing this Terraform configuration.",
+      };
+    }
+  }, [terraform, analyzed]);
 
   const passed = findings.filter((finding) => finding.severity === "PASS").length;
   const warnings = findings.filter((finding) => finding.severity === "WARNING").length;
@@ -1649,11 +1664,21 @@ export default function TerraformAnalyzerPage() {
           </section>
 
           <section>
-            <div className="grid grid-cols-3 gap-3">
-              <SummaryCard label="PASSED" value={passed} type="pass" />
-              <SummaryCard label="WARNINGS" value={warnings} type="warning" />
-              <SummaryCard label="CRITICAL" value={critical} type="critical" />
-            </div>
+            {analysisError ? (
+              <div className="rounded-xl border border-red-900/60 bg-red-950/20 p-5">
+                <p className="font-medium text-red-400">Analysis failed</p>
+                <p className="mt-2 break-all font-mono text-sm text-red-300/80">{analysisError}</p>
+                <p className="mt-3 text-sm text-zinc-400">
+                  This does not mean the configuration is safe — the analyzer could not complete. Adjust the input and try again.
+                </p>
+              </div>
+            ) : (
+              <div className="grid grid-cols-3 gap-3">
+                <SummaryCard label="PASSED" value={passed} type="pass" />
+                <SummaryCard label="WARNINGS" value={warnings} type="warning" />
+                <SummaryCard label="CRITICAL" value={critical} type="critical" />
+              </div>
+            )}
 
             <div className="mt-4 space-y-3">
               {!analyzed ? (
@@ -1661,7 +1686,7 @@ export default function TerraformAnalyzerPage() {
                   Paste a Terraform configuration and click{" "}
                   <span className="text-white">Analyze Terraform</span>.
                 </div>
-              ) : (
+              ) : analysisError ? null : (
                 findings.map((finding, index) => (
                   <FindingCard key={`${finding.title}-${index}`} finding={finding} />
                 ))

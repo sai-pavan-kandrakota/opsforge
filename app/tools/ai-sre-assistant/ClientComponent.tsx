@@ -116,7 +116,7 @@ const defaultAnalysis = (): IncidentAnalysis => ({
 });
 
 function analyzeIncident(input: string): IncidentAnalysis {
-  const text = input.trim();
+  const text = (input || "").trim();
 
   if (!text) {
     return {
@@ -316,7 +316,13 @@ function analyzeIncident(input: string): IncidentAnalysis {
 
 export default function AiSreAssistantPage() {
   const [input, setInput] = useState(exampleInputs.crashLoop);
-  const [analysis, setAnalysis] = useState<IncidentAnalysis>(() => analyzeIncident(exampleInputs.crashLoop));
+  const [analysis, setAnalysis] = useState<IncidentAnalysis>(() => {
+    try {
+      return analyzeIncident(exampleInputs.crashLoop);
+    } catch (_error) {
+      return defaultAnalysis();
+    }
+  });
   const [error, setError] = useState("");
 
   const handleAnalyze = () => {
@@ -325,8 +331,15 @@ export default function AiSreAssistantPage() {
       return;
     }
 
-    setError("");
-    setAnalysis(analyzeIncident(input));
+    try {
+      const result = analyzeIncident(input);
+      setError("");
+      setAnalysis(result);
+    } catch (_error) {
+      setError(
+        "Analysis failed for this input. This does not mean the incident is resolved — the assistant could not process the pasted text. The previous result below is unchanged; try shortening or simplifying the input and analyze again.",
+      );
+    }
   };
 
   const handleClear = () => {
@@ -337,8 +350,14 @@ export default function AiSreAssistantPage() {
 
   const loadExample = (key: keyof typeof exampleInputs) => {
     setInput(exampleInputs[key]);
-    setError("");
-    setAnalysis(analyzeIncident(exampleInputs[key]));
+
+    try {
+      const result = analyzeIncident(exampleInputs[key]);
+      setError("");
+      setAnalysis(result);
+    } catch (_error) {
+      setError("Could not generate the example analysis. Please try again.");
+    }
   };
 
   return (

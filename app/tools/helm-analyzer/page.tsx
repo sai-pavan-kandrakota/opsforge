@@ -12,7 +12,7 @@ export const metadata: Metadata = {
 
 export default function Page() {
   return (
-    <main className="min-h-screen bg-slate-950 text-slate-100">
+    <main className="min-h-screen bg-zinc-950 text-white">
       <SiteHeader />
       <ClientComponent />
       <SiteFooter />

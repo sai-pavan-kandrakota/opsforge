@@ -2177,7 +2177,7 @@ export default function KubernetesAnalyzer() {
                 {!error && (
                   <>
                     {/* Summary */}
-                    <div className="grid grid-cols-3 gap-3">
+                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
                       <div className="rounded-xl border border-emerald-900/60 bg-emerald-950/20 p-5">
                         <p className="text-xs uppercase tracking-widest text-emerald-500">
                           Passed

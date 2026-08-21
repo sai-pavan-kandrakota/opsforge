@@ -570,6 +570,16 @@ function additionalInfoNeeded(): string[] {
   ];
 }
 
+// Reuses the app's existing severity palette (rose/red/amber/emerald already
+// appear across the other analyzers) rather than introducing a new color for
+// this tool's four-tier CRITICAL/HIGH/MEDIUM/LOW model.
+function severityTextClass(severity: IncidentSeverity): string {
+  if (severity === "CRITICAL") return "text-rose-400";
+  if (severity === "HIGH") return "text-red-400";
+  if (severity === "MEDIUM") return "text-amber-400";
+  return "text-emerald-400";
+}
+
 function buildSummary(domain: IncidentDomain, confidence: ConfidenceLevel, severity: IncidentSeverity, signals: string[]): string {
   const evidenceList = signals.slice(0, 3).join(", ");
   return `${domain} incident, ${confidence.toLowerCase()} confidence, based on: ${evidenceList}. Severity assessed as ${severity}.`;
@@ -803,7 +813,7 @@ export default function AiSreAssistantPage() {
             </div>
             <div className="rounded-xl border border-slate-800 bg-slate-950/40 p-4">
               <div className="text-[10px] font-semibold uppercase tracking-[0.2em] text-slate-400">Severity</div>
-              <div className="mt-3 text-xl font-bold text-white">{analysis.severity}</div>
+              <div className={`mt-3 text-xl font-bold ${severityTextClass(analysis.severity)}`}>{analysis.severity}</div>
             </div>
             <div className="rounded-xl border border-slate-800 bg-slate-950/40 p-4">
               <div className="text-[10px] font-semibold uppercase tracking-[0.2em] text-slate-400">Confidence</div>

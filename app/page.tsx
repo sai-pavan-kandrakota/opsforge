@@ -1,6 +1,7 @@
 ﻿"use client";
 
 import { useMemo, useState } from "react";
+import type { FormEvent } from "react";
 
 const categoryOrder = [
   "NETWORKING",
@@ -99,8 +100,23 @@ const comingSoonTools = [
   "Log Analyzer",
 ];
 
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
 export default function Home() {
   const [query, setQuery] = useState("");
+  const [signupEmail, setSignupEmail] = useState("");
+  const [signupStatus, setSignupStatus] = useState<"idle" | "invalid" | "submitted">("idle");
+
+  function handleSignupSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    if (!EMAIL_PATTERN.test(signupEmail.trim())) {
+      setSignupStatus("invalid");
+      return;
+    }
+
+    setSignupStatus("submitted");
+  }
 
   const filteredCategories = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
@@ -166,13 +182,15 @@ export default function Home() {
           </div>
 
           <h1 className="text-4xl font-bold tracking-tight text-white sm:text-5xl lg:text-7xl">
-            DevOps tools that just work.
+            Find what&apos;s actually wrong with your infrastructure.
           </h1>
- 
+
           <p className="mx-auto mt-6 max-w-2xl text-base leading-7 text-zinc-400 sm:text-lg">
-            Free browser-based tools for DevOps, Cloud, Kubernetes, Terraform, CI/CD, and SRE
-            engineers. Use Kubernetes tools, Terraform analyzers, Dockerfile checks, GitHub Actions
-            workflow reviews, and AWS IAM policy analysis directly in your browser.
+            OpsForge is a set of practical analyzers for DevOps and SRE work: analyze, validate,
+            and troubleshoot Kubernetes manifests, Terraform configurations, Dockerfiles, GitHub
+            Actions workflows, Helm charts, and AWS IAM policies — plus a deterministic incident
+            analyzer for triaging production issues. Everything runs locally in your browser;
+            nothing is sent to a server.
           </p>
 
           <div className="mt-10 flex flex-col items-center justify-center gap-4 sm:flex-row">
@@ -180,7 +198,7 @@ export default function Home() {
               href="#tools"
               className="inline-flex items-center justify-center rounded-xl bg-white px-5 py-3 text-sm font-medium text-zinc-950 transition hover:bg-zinc-200"
             >
-              Browse tools
+              Explore the tools
             </a>
             <a
               href="#coming-soon"
@@ -371,6 +389,41 @@ export default function Home() {
                 <p className="mt-3 font-medium text-white">{tool}</p>
               </div>
             ))}
+          </div>
+
+          <div className="mt-10 max-w-xl rounded-2xl border border-zinc-800 bg-zinc-950/60 p-6">
+            <h3 className="text-lg font-semibold text-white">Want to know when new tools ship?</h3>
+            <p className="mt-2 text-sm text-zinc-400">
+              Leave your email and we&apos;ll let you know when new analyzers launch.
+            </p>
+
+            <form onSubmit={handleSignupSubmit} noValidate className="mt-4 flex flex-col gap-3 sm:flex-row">
+              <input
+                type="email"
+                value={signupEmail}
+                onChange={(event) => {
+                  setSignupEmail(event.target.value);
+                  setSignupStatus("idle");
+                }}
+                placeholder="you@company.com"
+                aria-label="Email address"
+                className="w-full flex-1 rounded-lg border border-zinc-700 bg-zinc-900 px-4 py-2.5 text-sm text-white outline-none transition placeholder:text-zinc-600 focus:border-zinc-500"
+              />
+              <button
+                type="submit"
+                className="rounded-lg bg-white px-5 py-2.5 text-sm font-medium text-zinc-950 transition hover:bg-zinc-200"
+              >
+                Notify me
+              </button>
+            </form>
+
+            {signupStatus === "invalid" ? (
+              <p className="mt-3 text-sm text-red-400">Enter a valid email address.</p>
+            ) : null}
+
+            {signupStatus === "submitted" ? (
+              <p className="mt-3 text-sm text-emerald-400">Email signup is coming soon.</p>
+            ) : null}
           </div>
         </div>
       </section>

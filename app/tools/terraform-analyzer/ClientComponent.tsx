@@ -126,61 +126,133 @@ output "db_endpoint" {
   value = aws_db_instance.app.address
 }`;
 
+// Returns the index just past the double-quoted string starting at `index`
+// (which must point at the opening `"`), honoring `\"` escapes. HCL has no
+// single-quoted strings, so `'` is never treated as a string delimiter.
+function skipStringLiteral(text: string, index: number): number {
+  let i = index + 1;
+
+  while (i < text.length) {
+    if (text[i] === "\\") {
+      i += 2;
+      continue;
+    }
+    if (text[i] === '"') {
+      return i + 1;
+    }
+    i += 1;
+  }
+
+  return text.length;
+}
+
+// Returns the index just past a `#`/`//` line comment starting at `index`.
+function skipLineComment(text: string, index: number): number {
+  const newlineIndex = text.indexOf("\n", index);
+  return newlineIndex === -1 ? text.length : newlineIndex + 1;
+}
+
+// Returns the index just past the closing `*/` of a block comment starting
+// at `index` (which must point at the opening `/*`).
+function skipBlockComment(text: string, index: number): number {
+  const closeIndex = text.indexOf("*/", index + 2);
+  return closeIndex === -1 ? text.length : closeIndex + 2;
+}
+
+// Scans the full text for `resource "<resourceType>" "<name>" {` headers,
+// treating `#`/`//` line comments, `/* */` block comments, and `"..."`
+// strings as opaque along the way. This means a resource declaration that
+// only *appears* inside a comment, or inside another resource's quoted
+// string value, is never examined as a candidate header in the first place
+// — unlike a plain regex scan over the raw text, which cannot tell code
+// apart from commented-out or string-embedded text.
 function getResourceBlocks(terraformText: string, resourceType: string): string[] {
-  const pattern = new RegExp(
+  const headerPattern = new RegExp(
     `resource\\s+"${resourceType}"\\s+"[^"]+"\\s*\\{`,
-    "gim",
+    "iy",
   );
   const blocks: string[] = [];
-  let match: RegExpExecArray | null;
+  let index = 0;
 
-  while ((match = pattern.exec(terraformText)) !== null) {
-    const openingBraceIndex = match.index + match[0].lastIndexOf("{");
-    let depth = 0;
-    let inString = false;
-    let stringQuote = "";
-    let escaped = false;
+  while (index < terraformText.length) {
+    const char = terraformText[index];
+    const nextChar = terraformText[index + 1];
 
-    for (let index = openingBraceIndex; index < terraformText.length; index += 1) {
-      const char = terraformText[index];
+    if (char === '"') {
+      index = skipStringLiteral(terraformText, index);
+      continue;
+    }
 
-      if (escaped) {
-        escaped = false;
+    if (char === "#" || (char === "/" && nextChar === "/")) {
+      index = skipLineComment(terraformText, index);
+      continue;
+    }
+
+    if (char === "/" && nextChar === "*") {
+      index = skipBlockComment(terraformText, index);
+      continue;
+    }
+
+    headerPattern.lastIndex = index;
+    const match = headerPattern.exec(terraformText);
+
+    if (match) {
+      const openingBraceIndex = index + match[0].lastIndexOf("{");
+      const block = extractBalancedBlock(terraformText, openingBraceIndex);
+
+      if (block !== null) {
+        blocks.push(block);
+        index = openingBraceIndex + block.length;
         continue;
-      }
-
-      if (char === "\\") {
-        escaped = true;
-        continue;
-      }
-
-      if (inString) {
-        if (char === stringQuote) {
-          inString = false;
-          stringQuote = "";
-        }
-        continue;
-      }
-
-      if (char === '"' || char === "'") {
-        inString = true;
-        stringQuote = char;
-        continue;
-      }
-
-      if (char === "{") {
-        depth += 1;
-      } else if (char === "}") {
-        depth -= 1;
-        if (depth === 0) {
-          blocks.push(terraformText.slice(openingBraceIndex, index + 1));
-          break;
-        }
       }
     }
+
+    index += 1;
   }
 
   return blocks;
+}
+
+// Scans forward from an opening `{` and returns the brace-balanced block,
+// treating `#`/`//` line comments, `/* */` block comments, and `"..."`
+// strings as opaque so braces inside them are never counted. Returns null if
+// the block never closes (e.g. truncated/malformed input).
+function extractBalancedBlock(text: string, openingBraceIndex: number): string | null {
+  let depth = 0;
+  let index = openingBraceIndex;
+
+  while (index < text.length) {
+    const char = text[index];
+    const nextChar = text[index + 1];
+
+    if (char === '"') {
+      index = skipStringLiteral(text, index);
+      continue;
+    }
+
+    if (char === "#" || (char === "/" && nextChar === "/")) {
+      index = skipLineComment(text, index);
+      continue;
+    }
+
+    if (char === "/" && nextChar === "*") {
+      index = skipBlockComment(text, index);
+      continue;
+    }
+
+    if (char === "{") {
+      depth += 1;
+    } else if (char === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        return text.slice(openingBraceIndex, index + 1);
+      }
+    }
+
+    index += 1;
+  }
+
+  return null;
 }
 
 function isTerraformReferenceLike(value: string): boolean {
@@ -1705,3 +1777,5 @@ function InfoCard({ title, text }: { title: string; text: string }) {
     </div>
   );
 }
+
+

@@ -84,9 +84,9 @@ const tools = [
     href: "/tools/aws-iam-analyzer",
   },
   {
-    name: "AI SRE Assistant",
+    name: "SRE Incident Analyzer",
     category: "SRE",
-    description: "Investigate incidents and generate structured troubleshooting guidance.",
+    description: "Classify incidents deterministically and generate an evidence-based troubleshooting plan.",
     href: "/tools/ai-sre-assistant",
   },
 ] as const;

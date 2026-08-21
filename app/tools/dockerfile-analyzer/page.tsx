@@ -1,6 +1,9 @@
 import Link from "next/link";
 import type { Metadata } from "next";
 
+import SiteFooter from "@/app/components/SiteFooter";
+import SiteHeader from "@/app/components/SiteHeader";
+
 import ClientComponent from "./ClientComponent";
 
 export const metadata: Metadata = {
@@ -12,6 +15,8 @@ export const metadata: Metadata = {
 export default function Page() {
   return (
     <main className="min-h-screen bg-slate-950 text-slate-100">
+      <SiteHeader />
+
       <div className="mx-auto max-w-6xl px-4 py-8 md:px-6">
         <header className="mb-6">
           <p className="text-xs uppercase tracking-[0.25em] text-teal-300/80">Container security</p>
@@ -58,6 +63,8 @@ export default function Page() {
           </div>
         </section>
       </div>
+
+      <SiteFooter />
     </main>
   );
 }

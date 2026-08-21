@@ -825,7 +825,7 @@ export default function AwsIamAnalyzerPage() {
   };
 
   return (
-    <main className="min-h-screen bg-slate-950 text-slate-100">
+    <div className="min-h-screen bg-slate-950 text-slate-100">
       <div className="mx-auto max-w-7xl px-4 py-10 sm:px-6 lg:px-8">
         <div className="mb-8 rounded-2xl border border-slate-800 bg-slate-900/80 p-6 shadow-2xl shadow-slate-950/60 backdrop-blur-sm">
           <p className="mb-3 text-xs font-semibold uppercase tracking-[0.25em] text-cyan-400">OpsForge</p>
@@ -950,6 +950,6 @@ export default function AwsIamAnalyzerPage() {
           This analyzer performs static policy checks only. Validate IAM policies against your organization's security requirements before deployment.
         </div>
       </div>
-    </main>
+    </div>
   );
 }

@@ -907,7 +907,7 @@ export default function HelmAnalyzerPage() {
   }
 
   return (
-    <main className="min-h-screen bg-black text-white">
+    <div className="min-h-screen bg-black text-white">
       <div className="mx-auto max-w-7xl px-6 py-12">
         <div className="mb-10">
           <div className="mb-3 text-sm uppercase tracking-[0.2em] text-zinc-500">
@@ -1028,7 +1028,7 @@ export default function HelmAnalyzerPage() {
           </div>
         </section>
       </div>
-    </main>
+    </div>
   );
 }
 

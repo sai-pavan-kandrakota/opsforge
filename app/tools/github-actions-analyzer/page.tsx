@@ -1,5 +1,8 @@
 import type { Metadata } from "next";
 
+import SiteFooter from "@/app/components/SiteFooter";
+import SiteHeader from "@/app/components/SiteHeader";
+
 import ClientComponent from "./ClientComponent";
 
 export const metadata: Metadata = {
@@ -8,5 +11,11 @@ export const metadata: Metadata = {
 };
 
 export default function Page() {
-  return <ClientComponent />;
+  return (
+    <main className="min-h-screen bg-slate-950 text-slate-100">
+      <SiteHeader />
+      <ClientComponent />
+      <SiteFooter />
+    </main>
+  );
 }

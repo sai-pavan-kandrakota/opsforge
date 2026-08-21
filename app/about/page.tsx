@@ -84,7 +84,7 @@ export default function AboutPage() {
               <li>CI/CD (GitHub Actions Analyzer)</li>
               <li>Infrastructure as Code (Terraform Analyzer)</li>
               <li>AWS &amp; Security (AWS IAM Policy Analyzer)</li>
-              <li>SRE troubleshooting (AI SRE Assistant)</li>
+              <li>SRE troubleshooting (SRE Incident Analyzer)</li>
             </ul>
           </section>
         </div>

@@ -90,13 +90,88 @@ function toStringArray(value: unknown): string[] {
   return [];
 }
 
-function getActions(statement: Statement): string[] {
-  return [...toStringArray(statement.Action), ...toStringArray(statement.NotAction)];
+type EffectKind = "allow" | "deny" | "unknown";
+
+function getEffectKind(statement: Statement): EffectKind {
+  const value = String(statement.Effect || "").trim().toLowerCase();
+  if (value === "allow") return "allow";
+  if (value === "deny") return "deny";
+  return "unknown";
 }
 
-function getResources(statement: Statement): string[] {
-  return [...toStringArray(statement.Resource), ...toStringArray(statement.NotResource)];
+type ActionSpec = {
+  mode: "include" | "exclude" | "both" | "none";
+  actions: string[];
+};
+
+// Action and NotAction are opposites, not variants of the same thing: Action
+// lists the exact API calls a statement applies to, while NotAction lists
+// the calls it EXCLUDES — so under Allow it applies to every other action
+// instead. Merging them into one array (as this analyzer previously did)
+// makes `Allow + NotAction: "iam:*"` look like a narrow two-word allow list
+// when it actually grants everything except IAM. They must stay separate.
+function getActionSpec(statement: Statement): ActionSpec {
+  const included = toStringArray(statement.Action);
+  const excluded = toStringArray(statement.NotAction);
+
+  if (included.length > 0 && excluded.length > 0) {
+    // Not valid AWS policy grammar — a statement should use one or the
+    // other. Surfaced as its own finding rather than guessed at below.
+    return { mode: "both", actions: included };
+  }
+  if (included.length > 0) {
+    return { mode: "include", actions: included };
+  }
+  if (excluded.length > 0) {
+    return { mode: "exclude", actions: excluded };
+  }
+  return { mode: "none", actions: [] };
 }
+
+function hasAnyActionField(statement: Statement): boolean {
+  return toStringArray(statement.Action).length > 0 || toStringArray(statement.NotAction).length > 0;
+}
+
+function getResourceList(statement: Statement): string[] {
+  return toStringArray(statement.Resource);
+}
+
+function hasAnyResourceField(statement: Statement): boolean {
+  return toStringArray(statement.Resource).length > 0 || toStringArray(statement.NotResource).length > 0;
+}
+
+// Tracks which statements a risky pattern was found in, split by Effect. An
+// Allow statement is a real grant; an explicit Deny using the same pattern
+// is a restrictive guardrail and must never be reported as dangerous. A
+// statement with a missing/invalid Effect is recorded on neither side —
+// that ambiguity is already surfaced by the "Effect" check above, and this
+// analyzer should not guess whether it behaves as Allow or Deny.
+type EffectBucket = { allow: string[]; denyGuardrail: string[] };
+
+function newBucket(): EffectBucket {
+  return { allow: [], denyGuardrail: [] };
+}
+
+function recordEffect(bucket: EffectBucket, effect: EffectKind, sid: string) {
+  if (effect === "allow") {
+    bucket.allow.push(sid);
+  } else if (effect === "deny") {
+    bucket.denyGuardrail.push(sid);
+  }
+}
+
+const HIGH_PRIVILEGE_ACTIONS = [
+  "iam:*",
+  "iam:attachuserpolicy",
+  "iam:createuser",
+  "iam:putusersharedpolicy",
+  "iam:createpolicyversion",
+  "iam:attachrolepolicy",
+  "sts:*",
+  "ec2:*",
+  "kms:*",
+  "s3:*",
+];
 
 function getStatements(policy: Record<string, unknown>): Statement[] {
   if (!policy || typeof policy !== "object") {
@@ -191,10 +266,10 @@ function analyzePolicy(policyText: string): Finding[] {
     if (!statement.Effect) {
       missingEffect.push(sid);
     }
-    if (getActions(statement).length === 0) {
+    if (!hasAnyActionField(statement)) {
       missingAction.push(sid);
     }
-    if (getResources(statement).length === 0) {
+    if (!hasAnyResourceField(statement)) {
       missingResource.push(sid);
     }
     if (!statement.Effect && !statement.Action && !statement.Resource && !statement.Principal) {
@@ -263,25 +338,31 @@ function analyzePolicy(policyText: string): Finding[] {
   }
 
   const principalClaims: string[] = [];
-  const wildcardAction: string[] = [];
-  const wildcardResource: string[] = [];
   const denyStatements: string[] = [];
   const conditionStatements: string[] = [];
-  const iamWildcard: string[] = [];
-  const stsWildcard: string[] = [];
-  const kmsWildcard: string[] = [];
-  const s3Wildcard: string[] = [];
-  const ec2Wildcard: string[] = [];
-  const passRoleStatements: string[] = [];
-  const assumeRoleStatements: string[] = [];
-  const broadPrivilegedActions: string[] = [];
   const specificStrongPasses: string[] = [];
+  const ambiguousActionNotAction: string[] = [];
+  const notActionAllowGrants: { sid: string; excludedActions: string[]; resourceHasWildcard: boolean }[] = [];
+
+  const wildcardAction = newBucket();
+  const wildcardResource = newBucket();
+  const broadPrivilegedActions = newBucket();
+  const iamWildcard = newBucket();
+  const stsWildcard = newBucket();
+  const kmsWildcard = newBucket();
+  const s3Wildcard = newBucket();
+  const ec2Wildcard = newBucket();
+  const passRole = newBucket();
+  const assumeRole = newBucket();
+  const sensitiveActionWithWildcardResource = newBucket();
 
   statements.forEach((statement, index) => {
     const sid = statement.Sid || `Statement ${index + 1}`;
-    const actions = getActions(statement);
-    const resources = getResources(statement);
-    const effect = String(statement.Effect || "").toLowerCase();
+    const effect = getEffectKind(statement);
+    const actionSpec = getActionSpec(statement);
+    const resources = getResourceList(statement);
+    const resourceHasWildcard = resources.includes("*");
+    const actionsLower = actionSpec.actions.map((action) => action.toLowerCase());
 
     if (statement.Principal && JSON.stringify(statement.Principal).includes("*")) {
       principalClaims.push(sid);
@@ -295,60 +376,72 @@ function analyzePolicy(policyText: string): Finding[] {
       conditionStatements.push(sid);
     }
 
-    if (actions.some((action) => action === "*")) {
-      wildcardAction.push(sid);
+    if (actionSpec.mode === "both") {
+      ambiguousActionNotAction.push(sid);
     }
 
-    if (resources.some((resource) => resource === "*")) {
-      wildcardResource.push(sid);
+    // Resource "*" is a literal fact about the statement regardless of
+    // whether Action or NotAction defines its action scope, so it is
+    // tracked independent of actionSpec.mode below.
+    if (resourceHasWildcard) {
+      recordEffect(wildcardResource, effect, sid);
     }
 
-    const actionLower = actions.map((action) => action.toLowerCase());
-    if (actionLower.some((action) => action === "iam:*" || action === "iam")) {
-      iamWildcard.push(sid);
+    if (actionSpec.mode === "exclude" && effect === "allow") {
+      // Allow + NotAction grants every action EXCEPT the ones listed — the
+      // opposite of a narrow allow list — so it gets its own finding below
+      // rather than being folded into the literal-Action checks.
+      notActionAllowGrants.push({ sid, excludedActions: actionSpec.actions, resourceHasWildcard });
     }
-    if (actionLower.some((action) => action === "sts:*" || action === "sts")) {
-      stsWildcard.push(sid);
-    }
-    if (actionLower.some((action) => action === "kms:*" || action === "kms")) {
-      kmsWildcard.push(sid);
-    }
-    if (actionLower.some((action) => action === "s3:*" || action === "s3")) {
-      s3Wildcard.push(sid);
-    }
-    if (actionLower.some((action) => action === "ec2:*" || action === "ec2")) {
-      ec2Wildcard.push(sid);
-    }
+    // Deny + NotAction denies every action except the ones listed. That is
+    // not a permission grant, so it is intentionally left out of every risk
+    // bucket below rather than guessed at.
 
-    if (actionLower.some((action) => action === "iam:passrole")) {
-      passRoleStatements.push(sid);
-    }
+    if (actionSpec.mode === "include") {
+      if (actionsLower.includes("*")) {
+        recordEffect(wildcardAction, effect, sid);
+      }
 
-    if (actionLower.some((action) => action === "sts:assumerole")) {
-      assumeRoleStatements.push(sid);
-    }
+      if (actionsLower.some((action) => action === "iam:*" || action === "iam")) {
+        recordEffect(iamWildcard, effect, sid);
+      }
+      if (actionsLower.some((action) => action === "sts:*" || action === "sts")) {
+        recordEffect(stsWildcard, effect, sid);
+      }
+      if (actionsLower.some((action) => action === "kms:*" || action === "kms")) {
+        recordEffect(kmsWildcard, effect, sid);
+      }
+      if (actionsLower.some((action) => action === "s3:*" || action === "s3")) {
+        recordEffect(s3Wildcard, effect, sid);
+      }
+      if (actionsLower.some((action) => action === "ec2:*" || action === "ec2")) {
+        recordEffect(ec2Wildcard, effect, sid);
+      }
 
-    if (
-      actionLower.some((action) =>
-        [
-          "iam:*",
-          "iam:attachuserpolicy",
-          "iam:createuser",
-          "iam:putusersharedpolicy",
-          "iam:createpolicyversion",
-          "iam:attachrolepolicy",
-          "sts:*",
-          "ec2:*",
-          "kms:*",
-          "s3:*",
-        ].includes(action),
-      )
-    ) {
-      broadPrivilegedActions.push(sid);
-    }
+      if (actionsLower.some((action) => action === "iam:passrole")) {
+        recordEffect(passRole, effect, sid);
+      }
 
-    if (actions.length > 0 && resources.length > 0 && actions.every((action) => action.includes(":") && !action.includes("*"))) {
-      specificStrongPasses.push(sid);
+      if (actionsLower.some((action) => action === "sts:assumerole")) {
+        recordEffect(assumeRole, effect, sid);
+      }
+
+      const isHighPrivilege = actionsLower.some((action) => HIGH_PRIVILEGE_ACTIONS.includes(action));
+      if (isHighPrivilege) {
+        recordEffect(broadPrivilegedActions, effect, sid);
+
+        if (resourceHasWildcard) {
+          recordEffect(sensitiveActionWithWildcardResource, effect, sid);
+        }
+      }
+
+      if (
+        actionSpec.actions.length > 0 &&
+        resources.length > 0 &&
+        actionSpec.actions.every((action) => action.includes(":") && !action.includes("*"))
+      ) {
+        specificStrongPasses.push(sid);
+      }
     }
   });
 
@@ -367,12 +460,33 @@ function analyzePolicy(policyText: string): Finding[] {
     });
   }
 
-  if (wildcardAction.length > 0) {
+  if (ambiguousActionNotAction.length > 0) {
+    findings.push({
+      title: "Action and NotAction combined",
+      severity: "WARNING",
+      description: `Statement(s) ${ambiguousActionNotAction.join(", ")} define both Action and NotAction, which AWS treats as invalid. This analyzer evaluated only the Action list for these statements and did not infer further meaning from the combination.`,
+      recommendation: "Use either Action or NotAction in a statement, never both, so its permission scope is unambiguous.",
+    });
+  } else {
+    findings.push({
+      title: "Action and NotAction combined",
+      severity: "PASS",
+      description: "No statements combine Action and NotAction in a single statement.",
+    });
+  }
+
+  if (wildcardAction.allow.length > 0) {
     findings.push({
       title: "Wildcard Action: \"*\"",
       severity: "CRITICAL",
-      description: `Wildcard actions were detected in ${wildcardAction.join(", ")}.`,
+      description: `Allow statement(s) grant Action "*" (every AWS API action): ${wildcardAction.allow.join(", ")}.`,
       recommendation: "Replace wildcard actions with the exact AWS API calls required for the workload.",
+    });
+  } else if (wildcardAction.denyGuardrail.length > 0) {
+    findings.push({
+      title: "Wildcard Action: \"*\"",
+      severity: "PASS",
+      description: `Action "*" appears only in explicit Deny statement(s) (${wildcardAction.denyGuardrail.join(", ")}), which restricts access rather than granting it.`,
     });
   } else {
     findings.push({
@@ -382,12 +496,37 @@ function analyzePolicy(policyText: string): Finding[] {
     });
   }
 
-  if (wildcardResource.length > 0) {
+  if (notActionAllowGrants.length > 0) {
+    const grantHasWildcardResource = notActionAllowGrants.some((grant) => grant.resourceHasWildcard);
+    const details = notActionAllowGrants
+      .map((grant) => `${grant.sid} (excludes ${grant.excludedActions.join(", ") || "no actions"})`)
+      .join("; ");
+    findings.push({
+      title: "NotAction broad permission scope",
+      severity: grantHasWildcardResource ? "CRITICAL" : "WARNING",
+      description: `Allow statement(s) use NotAction, which grants every action EXCEPT the ones listed rather than only those actions: ${details}.`,
+      recommendation: "Prefer an explicit Action allow-list over NotAction. If NotAction is required, scope Resource narrowly and add Conditions — never combine an Allow + NotAction statement with Resource \"*\".",
+    });
+  } else {
+    findings.push({
+      title: "NotAction broad permission scope",
+      severity: "PASS",
+      description: "No Allow statements use NotAction to implicitly grant a broad set of actions.",
+    });
+  }
+
+  if (wildcardResource.allow.length > 0) {
     findings.push({
       title: "Wildcard Resource: \"*\"",
       severity: "CRITICAL",
-      description: `Wildcard resources were detected in ${wildcardResource.join(", ")}.`,
+      description: `Wildcard resources were detected in Allow statement(s): ${wildcardResource.allow.join(", ")}.`,
       recommendation: "Scope Resource to exact ARNs whenever possible to reduce blast radius.",
+    });
+  } else if (wildcardResource.denyGuardrail.length > 0) {
+    findings.push({
+      title: "Wildcard Resource: \"*\"",
+      severity: "PASS",
+      description: `Resource "*" appears only in explicit Deny statement(s) (${wildcardResource.denyGuardrail.join(", ")}), which restricts access rather than granting it.`,
     });
   } else {
     findings.push({
@@ -397,12 +536,18 @@ function analyzePolicy(policyText: string): Finding[] {
     });
   }
 
-  if (broadPrivilegedActions.length > 0) {
+  if (broadPrivilegedActions.allow.length > 0) {
     findings.push({
       title: "AdministratorAccess-like permissions",
       severity: "CRITICAL",
-      description: `The policy contains broad administrative or service-wide permissions in ${broadPrivilegedActions.join(", ")}.`,
+      description: `The policy contains broad administrative or service-wide permissions in Allow statement(s): ${broadPrivilegedActions.allow.join(", ")}.`,
       recommendation: "Restrict the policy to the smallest necessary action set and minimize administrative access.",
+    });
+  } else if (broadPrivilegedActions.denyGuardrail.length > 0) {
+    findings.push({
+      title: "AdministratorAccess-like permissions",
+      severity: "PASS",
+      description: `Broad administrative actions appear only in explicit Deny statement(s) (${broadPrivilegedActions.denyGuardrail.join(", ")}), which is a restrictive guardrail rather than a grant.`,
     });
   } else {
     findings.push({
@@ -412,12 +557,18 @@ function analyzePolicy(policyText: string): Finding[] {
     });
   }
 
-  if (iamWildcard.length > 0) {
+  if (iamWildcard.allow.length > 0) {
     findings.push({
       title: "iam:* permissions",
       severity: "CRITICAL",
-      description: `iam:* access was found in ${iamWildcard.join(", ")}.`,
+      description: `iam:* access was found in Allow statement(s): ${iamWildcard.allow.join(", ")}.`,
       recommendation: "Avoid iam:* unless the role truly needs full IAM administration, which is uncommon in production.",
+    });
+  } else if (iamWildcard.denyGuardrail.length > 0) {
+    findings.push({
+      title: "iam:* permissions",
+      severity: "PASS",
+      description: `iam:* appears only in explicit Deny statement(s) (${iamWildcard.denyGuardrail.join(", ")}), which blocks this access rather than granting it.`,
     });
   } else {
     findings.push({
@@ -427,12 +578,18 @@ function analyzePolicy(policyText: string): Finding[] {
     });
   }
 
-  if (stsWildcard.length > 0) {
+  if (stsWildcard.allow.length > 0) {
     findings.push({
       title: "sts:* permissions",
       severity: "WARNING",
-      description: `sts:* was detected in ${stsWildcard.join(", ")}.`,
+      description: `sts:* was detected in Allow statement(s): ${stsWildcard.allow.join(", ")}.`,
       recommendation: "Limit STS assumptions to the specific roles required by your workload.",
+    });
+  } else if (stsWildcard.denyGuardrail.length > 0) {
+    findings.push({
+      title: "sts:* permissions",
+      severity: "PASS",
+      description: `sts:* appears only in explicit Deny statement(s) (${stsWildcard.denyGuardrail.join(", ")}), which blocks this access rather than granting it.`,
     });
   } else {
     findings.push({
@@ -442,12 +599,18 @@ function analyzePolicy(policyText: string): Finding[] {
     });
   }
 
-  if (kmsWildcard.length > 0) {
+  if (kmsWildcard.allow.length > 0) {
     findings.push({
       title: "kms:* permissions",
       severity: "WARNING",
-      description: `kms:* access was found in ${kmsWildcard.join(", ")}.`,
+      description: `kms:* access was found in Allow statement(s): ${kmsWildcard.allow.join(", ")}.`,
       recommendation: "Limit KMS access to the specific key ARNs needed for encryption and decryption.",
+    });
+  } else if (kmsWildcard.denyGuardrail.length > 0) {
+    findings.push({
+      title: "kms:* permissions",
+      severity: "PASS",
+      description: `kms:* appears only in explicit Deny statement(s) (${kmsWildcard.denyGuardrail.join(", ")}), which blocks this access rather than granting it.`,
     });
   } else {
     findings.push({
@@ -457,12 +620,18 @@ function analyzePolicy(policyText: string): Finding[] {
     });
   }
 
-  if (s3Wildcard.length > 0) {
+  if (s3Wildcard.allow.length > 0) {
     findings.push({
       title: "s3:* permissions",
       severity: "WARNING",
-      description: `s3:* access was found in ${s3Wildcard.join(", ")}.`,
+      description: `s3:* access was found in Allow statement(s): ${s3Wildcard.allow.join(", ")}.`,
       recommendation: "Prefer specific S3 actions such as GetObject, PutObject, or ListBucket rather than broad S3:* access.",
+    });
+  } else if (s3Wildcard.denyGuardrail.length > 0) {
+    findings.push({
+      title: "s3:* permissions",
+      severity: "PASS",
+      description: `s3:* appears only in explicit Deny statement(s) (${s3Wildcard.denyGuardrail.join(", ")}), which blocks this access rather than granting it.`,
     });
   } else {
     findings.push({
@@ -472,12 +641,18 @@ function analyzePolicy(policyText: string): Finding[] {
     });
   }
 
-  if (ec2Wildcard.length > 0) {
+  if (ec2Wildcard.allow.length > 0) {
     findings.push({
       title: "ec2:* permissions",
       severity: "WARNING",
-      description: `ec2:* access was found in ${ec2Wildcard.join(", ")}.`,
+      description: `ec2:* access was found in Allow statement(s): ${ec2Wildcard.allow.join(", ")}.`,
       recommendation: "Use the smallest set of EC2 actions required for the workload, and avoid generic administrative permissions.",
+    });
+  } else if (ec2Wildcard.denyGuardrail.length > 0) {
+    findings.push({
+      title: "ec2:* permissions",
+      severity: "PASS",
+      description: `ec2:* appears only in explicit Deny statement(s) (${ec2Wildcard.denyGuardrail.join(", ")}), which blocks this access rather than granting it.`,
     });
   } else {
     findings.push({
@@ -487,12 +662,18 @@ function analyzePolicy(policyText: string): Finding[] {
     });
   }
 
-  if (passRoleStatements.length > 0) {
+  if (passRole.allow.length > 0) {
     findings.push({
       title: "PassRole permission",
-      severity: passRoleStatements.some((statementId) => statementId.includes("*")) ? "CRITICAL" : "WARNING",
-      description: `iam:PassRole appears in ${passRoleStatements.join(", ")}.`,
+      severity: passRole.allow.some((statementId) => statementId.includes("*")) ? "CRITICAL" : "WARNING",
+      description: `iam:PassRole appears in Allow statement(s): ${passRole.allow.join(", ")}.`,
       recommendation: "Limit PassRole to the exact role ARNs required, and do not permit a broad resource wildcard for it.",
+    });
+  } else if (passRole.denyGuardrail.length > 0) {
+    findings.push({
+      title: "PassRole permission",
+      severity: "PASS",
+      description: `iam:PassRole appears only in explicit Deny statement(s) (${passRole.denyGuardrail.join(", ")}), which blocks this access rather than granting it.`,
     });
   } else {
     findings.push({
@@ -502,12 +683,18 @@ function analyzePolicy(policyText: string): Finding[] {
     });
   }
 
-  if (assumeRoleStatements.length > 0) {
+  if (assumeRole.allow.length > 0) {
     findings.push({
       title: "AssumeRole permission",
       severity: "WARNING",
-      description: `sts:AssumeRole is present in ${assumeRoleStatements.join(", ")}.`,
+      description: `sts:AssumeRole is present in Allow statement(s): ${assumeRole.allow.join(", ")}.`,
       recommendation: "Temporarily or permanently restrict AssumeRole to trusted roles and avoid broad trust patterns.",
+    });
+  } else if (assumeRole.denyGuardrail.length > 0) {
+    findings.push({
+      title: "AssumeRole permission",
+      severity: "PASS",
+      description: `sts:AssumeRole appears only in explicit Deny statement(s) (${assumeRole.denyGuardrail.join(", ")}), which blocks this access rather than granting it.`,
     });
   } else {
     findings.push({
@@ -517,22 +704,18 @@ function analyzePolicy(policyText: string): Finding[] {
     });
   }
 
-  const wildcardResourceWithPrivilegedAction = statements.filter((statement, index) => {
-    const sid = statement.Sid || `Statement ${index + 1}`;
-    const actions = getActions(statement).map((action) => action.toLowerCase());
-    const resources = getResources(statement);
-    const hasPrivilegedAction = actions.some((action) =>
-      ["iam:*", "sts:*", "kms:*", "s3:*", "ec2:*", "iam:passrole", "sts:assumerole"].includes(action),
-    );
-    return hasPrivilegedAction && resources.some((resource) => resource === "*") && sid;
-  });
-
-  if (wildcardResourceWithPrivilegedAction.length > 0) {
+  if (sensitiveActionWithWildcardResource.allow.length > 0) {
     findings.push({
       title: "Sensitive actions combined with Resource \"*\"",
       severity: "CRITICAL",
-      description: "High-impact actions are combined with wildcard resources, creating an especially risky access pattern.",
+      description: `High-impact actions are combined with wildcard resources in Allow statement(s), creating an especially risky access pattern: ${sensitiveActionWithWildcardResource.allow.join(", ")}.`,
       recommendation: "Limit privileged actions to specific resource ARNs and avoid Resource '*' for IAM, STS, KMS, and S3 operations.",
+    });
+  } else if (sensitiveActionWithWildcardResource.denyGuardrail.length > 0) {
+    findings.push({
+      title: "Sensitive actions combined with Resource \"*\"",
+      severity: "PASS",
+      description: `High-impact actions combined with Resource "*" appear only in explicit Deny statement(s) (${sensitiveActionWithWildcardResource.denyGuardrail.join(", ")}), which restricts access rather than granting it.`,
     });
   } else {
     findings.push({

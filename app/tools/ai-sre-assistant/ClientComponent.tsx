@@ -570,12 +570,12 @@ function additionalInfoNeeded(): string[] {
   ];
 }
 
-// Reuses the app's existing severity palette (rose/red/amber/emerald already
-// appear across the other analyzers) rather than introducing a new color for
-// this tool's four-tier CRITICAL/HIGH/MEDIUM/LOW model.
+// Reuses the app's canonical severity colors (red/amber/emerald) rather than
+// introducing a new color for this tool's four-tier CRITICAL/HIGH/MEDIUM/LOW
+// model. CRITICAL and HIGH share red — the canonical palette has no separate
+// "danger-adjacent" hue once rose is retired as a severity color.
 function severityTextClass(severity: IncidentSeverity): string {
-  if (severity === "CRITICAL") return "text-rose-400";
-  if (severity === "HIGH") return "text-red-400";
+  if (severity === "CRITICAL" || severity === "HIGH") return "text-red-400";
   if (severity === "MEDIUM") return "text-amber-400";
   return "text-emerald-400";
 }

@@ -881,7 +881,7 @@ export default function AwsIamAnalyzerPage() {
                 {[
                   { label: "PASSED", value: summary.PASS, badge: "text-emerald-400", border: "border-emerald-500/30", bg: "bg-emerald-500/10" },
                   { label: "WARNINGS", value: summary.WARNING, badge: "text-amber-400", border: "border-amber-500/30", bg: "bg-amber-500/10" },
-                  { label: "CRITICAL", value: summary.CRITICAL, badge: "text-rose-400", border: "border-rose-500/30", bg: "bg-rose-500/10" },
+                  { label: "CRITICAL", value: summary.CRITICAL, badge: "text-red-400", border: "border-red-500/30", bg: "bg-red-500/10" },
                 ].map((item) => (
                   <div key={item.label} className={`rounded-xl border p-4 ${item.border} ${item.bg}`}>
                     <div className={`text-xs font-semibold uppercase tracking-[0.2em] ${item.badge}`}>
@@ -926,7 +926,7 @@ export default function AwsIamAnalyzerPage() {
                           ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-300"
                           : finding.severity === "WARNING"
                             ? "border-amber-500/30 bg-amber-500/10 text-amber-300"
-                            : "border-rose-500/30 bg-rose-500/10 text-rose-300"
+                            : "border-red-500/30 bg-red-500/10 text-red-300"
                       }`}
                     >
                       {finding.severity}

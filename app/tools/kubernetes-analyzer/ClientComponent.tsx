@@ -2178,8 +2178,8 @@ export default function KubernetesAnalyzer() {
                   <>
                     {/* Summary */}
                     <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-                      <div className="rounded-xl border border-emerald-900/60 bg-emerald-950/20 p-5">
-                        <p className="text-xs uppercase tracking-widest text-emerald-500">
+                      <div className="rounded-xl border border-emerald-500/40 bg-emerald-950/30 p-5">
+                        <p className="text-xs uppercase tracking-widest text-emerald-400">
                           Passed
                         </p>
 
@@ -2188,8 +2188,8 @@ export default function KubernetesAnalyzer() {
                         </p>
                       </div>
 
-                      <div className="rounded-xl border border-amber-900/60 bg-amber-950/20 p-5">
-                        <p className="text-xs uppercase tracking-widest text-amber-500">
+                      <div className="rounded-xl border border-amber-500/40 bg-amber-950/30 p-5">
+                        <p className="text-xs uppercase tracking-widest text-amber-400">
                           Warnings
                         </p>
 
@@ -2198,8 +2198,8 @@ export default function KubernetesAnalyzer() {
                         </p>
                       </div>
 
-                      <div className="rounded-xl border border-red-900/60 bg-red-950/20 p-5">
-                        <p className="text-xs uppercase tracking-widest text-red-500">
+                      <div className="rounded-xl border border-red-500/40 bg-red-950/30 p-5">
+                        <p className="text-xs uppercase tracking-widest text-red-400">
                           Critical
                         </p>
 
@@ -2241,10 +2241,10 @@ export default function KubernetesAnalyzer() {
                                                       <span
                                                         className={`shrink-0 rounded-full border px-2.5 py-1 text-xs font-medium ${
                                                           check.severity === "pass"
-                                                            ? "border-emerald-900 bg-emerald-950/40 text-emerald-400"
+                                                            ? "border-emerald-500/40 bg-emerald-950/30 text-emerald-400"
                                                             : check.severity === "warning"
-                                                              ? "border-amber-900 bg-amber-950/40 text-amber-400"
-                                                              : "border-red-900 bg-red-950/40 text-red-400"
+                                                              ? "border-amber-500/40 bg-amber-950/30 text-amber-400"
+                                                              : "border-red-500/40 bg-red-950/30 text-red-400"
                                                         }`}
                                                       >
                                                         {severityLabel(check.severity)}

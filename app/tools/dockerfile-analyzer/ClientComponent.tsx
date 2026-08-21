@@ -557,7 +557,7 @@ export default function DockerfileAnalyzerPage() {
   }
 
   return (
-    <div className="min-h-screen bg-black text-white">
+    <div className="min-h-screen bg-zinc-950 text-white">
       <div className="mx-auto max-w-7xl px-6 py-12">
         <div className="mb-10">
           <div className="mb-3 text-sm uppercase tracking-[0.2em] text-zinc-500">
@@ -594,7 +594,7 @@ export default function DockerfileAnalyzerPage() {
                 setAnalyzed(false);
               }}
               spellCheck={false}
-              className="min-h-[520px] w-full resize-y rounded-xl border border-zinc-800 bg-black p-4 font-mono text-sm leading-6 text-zinc-200 outline-none transition focus:border-zinc-500"
+              className="min-h-[520px] w-full resize-y rounded-xl border border-zinc-800 bg-zinc-950 p-4 font-mono text-sm leading-6 text-zinc-200 outline-none transition focus:border-zinc-500"
               placeholder="Paste your Dockerfile here..."
             />
 

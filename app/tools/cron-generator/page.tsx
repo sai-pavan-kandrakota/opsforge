@@ -348,7 +348,7 @@ export default function CronGenerator() {
             </button>
           </div>
 
-          <div className="mt-5 rounded-xl border border-zinc-800 bg-zinc-950 p-5">
+          <div role="status" className="mt-5 rounded-xl border border-zinc-800 bg-zinc-950 p-5">
             <div className="flex items-center gap-3">
               <div
                 className={`h-2.5 w-2.5 rounded-full ${
@@ -433,7 +433,7 @@ export default function CronGenerator() {
                     {preset.name}
                   </span>
 
-                  <span className="text-zinc-600 transition group-hover:text-white">
+                  <span className="text-zinc-600 transition group-hover:text-white" aria-hidden="true">
                     →
                   </span>
                 </div>
@@ -483,9 +483,9 @@ export default function CronGenerator() {
 
         {/* Warning */}
         <section className="mt-8 rounded-xl border border-amber-900/50 bg-amber-950/10 p-5">
-          <h3 className="font-semibold text-amber-400">
+          <div className="font-semibold text-amber-400">
             Timezone reminder
-          </h3>
+          </div>
 
           <p className="mt-2 text-sm leading-6 text-zinc-400">
             Cron jobs normally use the timezone configured on

@@ -873,7 +873,7 @@ export default function AwsIamAnalyzerPage() {
 
           <aside className="space-y-4">
             <div className="rounded-2xl border border-zinc-800 bg-zinc-900/80 p-5 shadow-xl shadow-zinc-950/40">
-              <h3 className="mb-4 text-sm font-semibold uppercase tracking-[0.2em] text-zinc-500">Summary</h3>
+              <h2 className="mb-4 text-sm font-semibold uppercase tracking-[0.2em] text-zinc-500">Summary</h2>
               <div className="grid gap-3 sm:grid-cols-3 lg:grid-cols-1 xl:grid-cols-3">
                 {[
                   { label: "PASSED", value: summary.PASS, badge: "text-emerald-400", border: "border-emerald-500/30", bg: "bg-emerald-500/10" },
@@ -891,7 +891,7 @@ export default function AwsIamAnalyzerPage() {
             </div>
 
             <div className="rounded-2xl border border-zinc-800 bg-zinc-900/80 p-5 shadow-xl shadow-zinc-950/40">
-              <h3 className="mb-3 text-sm font-semibold uppercase tracking-[0.2em] text-zinc-500">Quick checks</h3>
+              <h2 className="mb-3 text-sm font-semibold uppercase tracking-[0.2em] text-zinc-500">Quick checks</h2>
               <ul className="space-y-2 text-sm text-zinc-400">
                 <li>• Avoid wildcard Action and Resource values unless explicitly required.</li>
                 <li>• Prefer scoped IAM actions and exact ARNs.</li>

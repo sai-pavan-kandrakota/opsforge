@@ -330,9 +330,9 @@ spec:
         </section>
 
         <section className="mt-8 rounded-xl border border-amber-900/50 bg-amber-950/10 p-5">
-          <h3 className="font-semibold text-amber-400">
+          <div className="font-semibold text-amber-400">
             Important
-          </h3>
+          </div>
 
           <p className="mt-2 text-sm leading-6 text-zinc-400">
             Generated YAML is a starting point. Review

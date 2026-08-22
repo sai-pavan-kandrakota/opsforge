@@ -773,7 +773,7 @@ export default function AiSreAssistantPage() {
           />
 
           {error ? (
-            <div className="mt-3 rounded-lg border border-rose-500/20 bg-rose-500/10 p-3 text-sm text-rose-200">
+            <div role="alert" className="mt-3 rounded-lg border border-rose-500/20 bg-rose-500/10 p-3 text-sm text-rose-200">
               {error}
             </div>
           ) : null}
@@ -833,6 +833,9 @@ export default function AiSreAssistantPage() {
                       className="rounded-full border border-zinc-700 bg-zinc-900 px-2 py-1 text-xs"
                     >
                       {d.domain} ({d.confidence})
+                      <span className="sr-only">
+                        signals: {d.signals.join(", ")}
+                      </span>
                     </span>
                   ))
                 )}

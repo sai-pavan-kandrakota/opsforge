@@ -787,7 +787,7 @@ function FindingCard({ finding }: { finding: Finding }) {
   return (
     <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-5">
       <div className="flex items-start justify-between gap-4">
-        <h3 className="font-medium">{finding.title}</h3>
+        <div className="font-medium">{finding.title}</div>
 
         <span
           className={`shrink-0 rounded-full border px-2.5 py-1 text-xs font-medium ${badgeClass}`}

@@ -156,7 +156,7 @@ export default function JsonFormatter() {
           </div>
 
           {error && (
-            <div className="mt-5 rounded-lg border border-red-900/60 bg-red-950/20 p-4">
+            <div role="alert" className="mt-5 rounded-lg border border-red-900/60 bg-red-950/20 p-4">
               <p className="text-sm font-medium text-red-400">
                 Invalid JSON
               </p>

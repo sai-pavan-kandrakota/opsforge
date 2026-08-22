@@ -202,7 +202,7 @@ export default function YamlValidator() {
 
           {/* Status */}
           {error && (
-            <div className="mt-5 rounded-xl border border-red-900/60 bg-red-950/20 p-5">
+            <div role="alert" className="mt-5 rounded-xl border border-red-900/60 bg-red-950/20 p-5">
               <div className="flex items-center gap-3">
                 <div className="h-2.5 w-2.5 rounded-full bg-red-500" />
 
@@ -218,7 +218,7 @@ export default function YamlValidator() {
           )}
 
           {formatted && !error && (
-            <div className="mt-5 rounded-xl border border-emerald-900/60 bg-emerald-950/20 p-5">
+            <div role="status" className="mt-5 rounded-xl border border-emerald-900/60 bg-emerald-950/20 p-5">
               <div className="flex items-center gap-3">
                 <div className="h-2.5 w-2.5 rounded-full bg-emerald-500" />
 

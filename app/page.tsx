@@ -211,8 +211,8 @@ export default function Home() {
           </div>
 
           <div className="mx-auto mt-10 max-w-2xl">
-            <div className="flex items-center rounded-2xl border border-zinc-700 bg-zinc-900/80 px-4 py-3 shadow-[0_20px_70px_rgba(0,0,0,0.35)] ring-1 ring-white/5 sm:px-5">
-              <span className="mr-3 text-lg text-zinc-500">⌕</span>
+            <div className="flex items-center rounded-2xl border border-zinc-700 bg-zinc-900/80 px-4 py-3 shadow-[0_20px_70px_rgba(0,0,0,0.35)] ring-1 ring-white/5 focus-within:border-zinc-500 sm:px-5">
+              <span className="mr-3 text-lg text-zinc-500" aria-hidden="true">⌕</span>
               <input
                 type="text"
                 value={query}
@@ -229,7 +229,7 @@ export default function Home() {
  
           {/* What is OpsForge? */}
           <div className="mx-auto mt-8 max-w-3xl text-center">
-            <h3 className="text-lg font-semibold text-white">What is OpsForge?</h3>
+            <h2 className="text-lg font-semibold text-white">What is OpsForge?</h2>
             <p className="mt-3 text-sm text-zinc-400">
               OpsForge provides practical, browser-based DevOps and SRE tools that work where
               engineers work — in the browser. Many OpsForge tools run entirely locally in your
@@ -242,32 +242,32 @@ export default function Home() {
           {/* Built for DevOps & SRE */}
           <div className="mx-auto mt-8 max-w-4xl">
             <div className="rounded-2xl border border-zinc-800 bg-zinc-900/80 p-6">
-              <h3 className="text-sm font-semibold uppercase tracking-[0.2em] text-zinc-400">Built for DevOps &amp; SRE</h3>
+              <h2 className="text-sm font-semibold uppercase tracking-[0.2em] text-zinc-400">Built for DevOps &amp; SRE</h2>
               <div className="mt-4 grid gap-4 sm:grid-cols-3">
                 <div>
-                  <h4 className="font-semibold text-white">Kubernetes</h4>
+                  <h3 className="font-semibold text-white">Kubernetes</h3>
                   <p className="mt-1 text-sm text-zinc-400">Kubernetes tools and a Kubernetes analyzer for manifests and Helm charts.</p>
                 </div>
                 <div>
-                  <h4 className="font-semibold text-white">Terraform</h4>
+                  <h3 className="font-semibold text-white">Terraform</h3>
                   <p className="mt-1 text-sm text-zinc-400">Terraform analyzer and infrastructure as code checks to improve reliability and security.</p>
                 </div>
                 <div>
-                  <h4 className="font-semibold text-white">CI/CD &amp; Containers</h4>
+                  <h3 className="font-semibold text-white">CI/CD &amp; Containers</h3>
                   <p className="mt-1 text-sm text-zinc-400">GitHub Actions analyzer and Dockerfile analyzer for safer CI/CD and container builds.</p>
                 </div>
               </div>
               <div className="mt-4 grid gap-4 sm:grid-cols-3">
                 <div>
-                  <h4 className="font-semibold text-white">AWS &amp; Security</h4>
+                  <h3 className="font-semibold text-white">AWS &amp; Security</h3>
                   <p className="mt-1 text-sm text-zinc-400">IAM policy analyzer and security-focused checks for cloud resources.</p>
                 </div>
                 <div>
-                  <h4 className="font-semibold text-white">Networking &amp; YAML</h4>
+                  <h3 className="font-semibold text-white">Networking &amp; YAML</h3>
                   <p className="mt-1 text-sm text-zinc-400">CIDR calculations, YAML and JSON validation tools for configuration hygiene.</p>
                 </div>
                 <div>
-                  <h4 className="font-semibold text-white">SRE Troubleshooting</h4>
+                  <h3 className="font-semibold text-white">SRE Troubleshooting</h3>
                   <p className="mt-1 text-sm text-zinc-400">A local SRE assistant provides structured investigations and remediation checklists.</p>
                 </div>
               </div>
@@ -352,7 +352,7 @@ export default function Home() {
                         <span className="rounded-full border border-zinc-700 bg-zinc-950 px-2.5 py-1 text-[10px] font-medium uppercase tracking-[0.2em] text-zinc-400">
                           {category}
                         </span>
-                        <span className="text-xl text-zinc-500 transition group-hover:translate-x-1 group-hover:text-white">
+                        <span className="text-xl text-zinc-500 transition group-hover:translate-x-1 group-hover:text-white" aria-hidden="true">
                           →
                         </span>
                       </div>
@@ -420,11 +420,11 @@ export default function Home() {
             </form>
 
             {signupStatus === "invalid" ? (
-              <p className="mt-3 text-sm text-red-400">Enter a valid email address.</p>
+              <p role="alert" className="mt-3 text-sm text-red-400">Enter a valid email address.</p>
             ) : null}
 
             {signupStatus === "submitted" ? (
-              <p className="mt-3 text-sm text-emerald-400">Email signup is coming soon.</p>
+              <p role="status" className="mt-3 text-sm text-emerald-400">Email signup is coming soon.</p>
             ) : null}
           </div>
         </div>

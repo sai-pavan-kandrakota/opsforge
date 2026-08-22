@@ -2184,9 +2184,9 @@ export default function KubernetesAnalyzer() {
                                           {resources.map((resource, rIdx) => (
                                             <div key={`${resource.kind}-${resource.name}-${rIdx}`}>
                                               <div className="mb-3 flex items-baseline justify-between">
-                                                <h3 className="text-lg font-semibold">
+                                                <h2 className="text-lg font-semibold">
                                                   {resource.kind} / {resource.name}
-                                                </h3>
+                                                </h2>
 
                                                 <div className="text-xs text-zinc-500">{resource.namespace !== '<none>' ? resource.namespace : 'no namespace'}</div>
                                               </div>
@@ -2199,7 +2199,7 @@ export default function KubernetesAnalyzer() {
                                                   >
                                                     <div className="flex items-start justify-between gap-4">
                                                       <div>
-                                                        <h4 className="font-semibold">{check.title}</h4>
+                                                        <h3 className="font-semibold">{check.title}</h3>
 
                                                         <p className="mt-2 text-sm leading-6 text-zinc-400">
                                                           {check.description}
@@ -2281,9 +2281,9 @@ export default function KubernetesAnalyzer() {
         </section>
 
         <section className="mt-8 rounded-xl border border-amber-900/50 bg-amber-950/10 p-5">
-          <h3 className="font-semibold text-amber-400">
+          <div className="font-semibold text-amber-400">
             Important
-          </h3>
+          </div>
 
           <p className="mt-2 text-sm leading-6 text-zinc-400">
             This analyzer provides practical static checks.

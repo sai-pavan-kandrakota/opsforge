@@ -722,7 +722,7 @@ function FindingCard({ finding }: { finding: Finding }) {
     <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-5">
       <div className="flex items-start justify-between gap-4">
         <div>
-          <h3 className="font-medium">{finding.title}</h3>
+          <div className="font-medium">{finding.title}</div>
           <div className={`mt-2 text-[10px] uppercase tracking-[0.18em] ${categoryClass}`}>
             {finding.category}
           </div>

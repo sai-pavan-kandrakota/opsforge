@@ -673,7 +673,7 @@ function renderWithInlineCode(text: string) {
   return parts.map((part, index) => {
     if (part.startsWith("`") && part.endsWith("`") && part.length > 1) {
       return (
-        <code key={index} className="rounded bg-slate-800 px-1.5 py-0.5 text-cyan-200">
+        <code key={index} className="rounded bg-zinc-800 px-1.5 py-0.5 text-cyan-200">
           {part.slice(1, -1)}
         </code>
       );
@@ -733,17 +733,17 @@ export default function AiSreAssistantPage() {
   };
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100">
+    <div className="min-h-screen bg-zinc-950 text-white">
       <div className="mx-auto max-w-7xl px-4 py-10 sm:px-6 lg:px-8">
-        <div className="mb-8 rounded-2xl border border-slate-800 bg-slate-900/80 p-6 shadow-2xl shadow-slate-950/60 backdrop-blur-sm">
+        <div className="mb-8 rounded-2xl border border-zinc-800 bg-zinc-900/80 p-6 shadow-2xl shadow-zinc-950/60 backdrop-blur-sm">
           <p className="mb-3 text-xs font-semibold uppercase tracking-[0.25em] text-cyan-400">OpsForge</p>
           <h1 className="text-3xl font-bold tracking-tight text-white sm:text-4xl">SRE Incident Analyzer</h1>
-          <p className="mt-3 max-w-3xl text-base text-slate-300">
+          <p className="mt-3 max-w-3xl text-base text-zinc-400">
             Deterministic incident triage: classify the likely failure domain, assess severity, and get an evidence-based investigation plan — entirely in your browser, no external calls.
           </p>
         </div>
 
-        <div className="rounded-2xl border border-slate-800 bg-slate-900/80 p-4 shadow-xl shadow-slate-950/40">
+        <div className="rounded-2xl border border-zinc-800 bg-zinc-900/80 p-4 shadow-xl shadow-zinc-950/40">
           <div className="mb-4 flex flex-wrap gap-2">
             {[
               ["Kubernetes CrashLoopBackOff", "crashLoop"],
@@ -756,7 +756,7 @@ export default function AiSreAssistantPage() {
                 key={key}
                 type="button"
                 onClick={() => loadExample(key as keyof typeof exampleInputs)}
-                className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-xs font-medium text-slate-200 transition hover:border-cyan-500 hover:text-cyan-300"
+                className="rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-xs font-medium text-zinc-300 transition hover:border-cyan-500 hover:text-cyan-300"
               >
                 {label}
               </button>
@@ -767,7 +767,8 @@ export default function AiSreAssistantPage() {
             value={input}
             onChange={(event) => setInput(event.target.value)}
             spellCheck={false}
-            className="h-[360px] w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-3 font-mono text-sm text-slate-100 outline-none transition focus:border-cyan-500 focus:ring-2 focus:ring-cyan-500/30"
+            aria-label="Incident details input"
+            className="h-[360px] w-full rounded-xl border border-zinc-700 bg-zinc-950 px-4 py-3 font-mono text-sm text-zinc-200 outline-none transition focus:border-cyan-500 focus:ring-2 focus:ring-cyan-500/30"
             placeholder="Paste incident details, logs, alerts, application errors, deployment failures, or Kubernetes issues here..."
           />
 
@@ -781,55 +782,55 @@ export default function AiSreAssistantPage() {
             <button
               type="button"
               onClick={handleAnalyze}
-              className="rounded-lg bg-cyan-500 px-4 py-2.5 text-sm font-semibold text-slate-950 transition hover:bg-cyan-400"
+              className="rounded-lg bg-cyan-500 px-4 py-2.5 text-sm font-semibold text-zinc-950 transition hover:bg-cyan-400"
             >
               Analyze Incident
             </button>
             <button
               type="button"
               onClick={handleClear}
-              className="rounded-lg border border-slate-700 bg-slate-800 px-4 py-2.5 text-sm font-medium text-slate-200 transition hover:border-slate-500 hover:text-white"
+              className="rounded-lg border border-zinc-700 bg-zinc-800 px-4 py-2.5 text-sm font-medium text-zinc-300 transition hover:border-zinc-500 hover:text-white"
             >
               Clear
             </button>
           </div>
         </div>
 
-        <section className="mt-8 rounded-2xl border border-slate-800 bg-slate-900/80 p-5 shadow-xl shadow-slate-950/40">
+        <section className="mt-8 rounded-2xl border border-zinc-800 bg-zinc-900/80 p-5 shadow-xl shadow-zinc-950/40">
           <div className="mb-5 flex items-center justify-between gap-3">
             <h2 className="text-xl font-semibold text-white">Incident analysis</h2>
           </div>
 
-          <p className="mb-5 text-sm leading-6 text-slate-300">{analysis.summary}</p>
+          <p className="mb-5 text-sm leading-6 text-zinc-400">{analysis.summary}</p>
 
           <div className="grid gap-4 lg:grid-cols-4">
-            <div className="rounded-xl border border-slate-800 bg-slate-950/40 p-4">
-              <div className="text-[10px] font-semibold uppercase tracking-[0.2em] text-slate-400">Primary domain</div>
+            <div className="rounded-xl border border-zinc-800 bg-zinc-950/40 p-4">
+              <div className="text-[10px] font-semibold uppercase tracking-[0.2em] text-zinc-500">Primary domain</div>
               <div className="mt-2">
                 <span className="inline-flex rounded-full border border-cyan-500/30 bg-cyan-500/10 px-2 py-1 text-sm text-cyan-200">
                   {analysis.primaryDomain}
                 </span>
               </div>
             </div>
-            <div className="rounded-xl border border-slate-800 bg-slate-950/40 p-4">
-              <div className="text-[10px] font-semibold uppercase tracking-[0.2em] text-slate-400">Severity</div>
+            <div className="rounded-xl border border-zinc-800 bg-zinc-950/40 p-4">
+              <div className="text-[10px] font-semibold uppercase tracking-[0.2em] text-zinc-500">Severity</div>
               <div className={`mt-3 text-xl font-bold ${severityTextClass(analysis.severity)}`}>{analysis.severity}</div>
             </div>
-            <div className="rounded-xl border border-slate-800 bg-slate-950/40 p-4">
-              <div className="text-[10px] font-semibold uppercase tracking-[0.2em] text-slate-400">Confidence</div>
+            <div className="rounded-xl border border-zinc-800 bg-zinc-950/40 p-4">
+              <div className="text-[10px] font-semibold uppercase tracking-[0.2em] text-zinc-500">Confidence</div>
               <div className="mt-3 text-xl font-bold text-white">{analysis.confidence}</div>
             </div>
-            <div className="rounded-xl border border-slate-800 bg-slate-950/40 p-4">
-              <div className="text-[10px] font-semibold uppercase tracking-[0.2em] text-slate-400">Secondary domains</div>
-              <div className="mt-2 flex flex-wrap gap-2 text-sm text-slate-300">
+            <div className="rounded-xl border border-zinc-800 bg-zinc-950/40 p-4">
+              <div className="text-[10px] font-semibold uppercase tracking-[0.2em] text-zinc-500">Secondary domains</div>
+              <div className="mt-2 flex flex-wrap gap-2 text-sm text-zinc-400">
                 {analysis.secondaryDomains.length === 0 ? (
-                  <span className="text-slate-500">None identified</span>
+                  <span className="text-zinc-600">None identified</span>
                 ) : (
                   analysis.secondaryDomains.map((d) => (
                     <span
                       key={d.domain}
                       title={`${d.confidence} confidence — ${d.signals.join(", ")}`}
-                      className="rounded-full border border-slate-700 bg-slate-900 px-2 py-1 text-xs"
+                      className="rounded-full border border-zinc-700 bg-zinc-900 px-2 py-1 text-xs"
                     >
                       {d.domain} ({d.confidence})
                     </span>
@@ -840,28 +841,28 @@ export default function AiSreAssistantPage() {
           </div>
 
           <div className="mt-6 grid gap-4">
-            <div className="rounded-xl border border-slate-800 bg-slate-950/40 p-4">
-              <h3 className="text-sm font-semibold uppercase tracking-[0.2em] text-slate-400">Evidence</h3>
+            <div className="rounded-xl border border-zinc-800 bg-zinc-950/40 p-4">
+              <h3 className="text-sm font-semibold uppercase tracking-[0.2em] text-zinc-500">Evidence</h3>
               {analysis.evidence.length === 0 ? (
-                <p className="mt-3 text-sm leading-6 text-slate-400">No specific evidence phrases were matched for a primary domain.</p>
+                <p className="mt-3 text-sm leading-6 text-zinc-500">No specific evidence phrases were matched for a primary domain.</p>
               ) : (
-                <ul className="mt-3 list-disc space-y-2 pl-5 text-sm leading-6 text-slate-300">
+                <ul className="mt-3 list-disc space-y-2 pl-5 text-sm leading-6 text-zinc-400">
                   {analysis.evidence.map((item, index) => (
                     <li key={`${item}-${index}`}>{item}</li>
                   ))}
                 </ul>
               )}
               {analysis.severityEvidence.length > 0 ? (
-                <p className="mt-3 text-xs text-slate-500">
+                <p className="mt-3 text-xs text-zinc-600">
                   Severity evidence: {analysis.severityEvidence.join(", ")}
                 </p>
               ) : null}
             </div>
 
             {analysis.investigationSteps.length > 0 ? (
-              <div className="rounded-xl border border-slate-800 bg-slate-950/40 p-4">
-                <h3 className="text-sm font-semibold uppercase tracking-[0.2em] text-slate-400">Investigation plan</h3>
-                <ol className="mt-3 list-decimal space-y-2 pl-5 text-sm leading-6 text-slate-300">
+              <div className="rounded-xl border border-zinc-800 bg-zinc-950/40 p-4">
+                <h3 className="text-sm font-semibold uppercase tracking-[0.2em] text-zinc-500">Investigation plan</h3>
+                <ol className="mt-3 list-decimal space-y-2 pl-5 text-sm leading-6 text-zinc-400">
                   {analysis.investigationSteps.map((step, index) => (
                     <li key={`${step}-${index}`}>{renderWithInlineCode(step)}</li>
                   ))}
@@ -870,9 +871,9 @@ export default function AiSreAssistantPage() {
             ) : null}
 
             {analysis.immediateActions.length > 0 ? (
-              <div className="rounded-xl border border-slate-800 bg-slate-950/40 p-4">
-                <h3 className="text-sm font-semibold uppercase tracking-[0.2em] text-slate-400">Immediate actions</h3>
-                <ul className="mt-3 list-disc space-y-2 pl-5 text-sm leading-6 text-slate-300">
+              <div className="rounded-xl border border-zinc-800 bg-zinc-950/40 p-4">
+                <h3 className="text-sm font-semibold uppercase tracking-[0.2em] text-zinc-500">Immediate actions</h3>
+                <ul className="mt-3 list-disc space-y-2 pl-5 text-sm leading-6 text-zinc-400">
                   {analysis.immediateActions.map((item, index) => (
                     <li key={`${item}-${index}`}>{item}</li>
                   ))}
@@ -881,9 +882,9 @@ export default function AiSreAssistantPage() {
             ) : null}
 
             {analysis.followUpActions.length > 0 ? (
-              <div className="rounded-xl border border-slate-800 bg-slate-950/40 p-4">
-                <h3 className="text-sm font-semibold uppercase tracking-[0.2em] text-slate-400">Follow-up / root-cause review</h3>
-                <ul className="mt-3 list-disc space-y-2 pl-5 text-sm leading-6 text-slate-300">
+              <div className="rounded-xl border border-zinc-800 bg-zinc-950/40 p-4">
+                <h3 className="text-sm font-semibold uppercase tracking-[0.2em] text-zinc-500">Follow-up / root-cause review</h3>
+                <ul className="mt-3 list-disc space-y-2 pl-5 text-sm leading-6 text-zinc-400">
                   {analysis.followUpActions.map((item, index) => (
                     <li key={`${item}-${index}`}>{item}</li>
                   ))}
@@ -894,10 +895,10 @@ export default function AiSreAssistantPage() {
             {analysis.additionalInformationNeeded.length > 0 ? (
               <div className="rounded-xl border border-amber-900/40 bg-amber-950/10 p-4">
                 <h3 className="text-sm font-semibold uppercase tracking-[0.2em] text-amber-400">Additional information needed</h3>
-                <p className="mt-2 text-sm leading-6 text-slate-300">
+                <p className="mt-2 text-sm leading-6 text-zinc-400">
                   The failure domain could not be determined from the text provided. Provide any of the following for a more useful analysis:
                 </p>
-                <ul className="mt-3 list-disc space-y-2 pl-5 text-sm leading-6 text-slate-300">
+                <ul className="mt-3 list-disc space-y-2 pl-5 text-sm leading-6 text-zinc-400">
                   {analysis.additionalInformationNeeded.map((item, index) => (
                     <li key={`${item}-${index}`}>{item}</li>
                   ))}

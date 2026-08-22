@@ -128,11 +128,12 @@ spec:
 
             <div className="mt-6 space-y-5">
               <div>
-                <label className="mb-2 block text-sm text-zinc-400">
+                <label htmlFor="resource-type" className="mb-2 block text-sm text-zinc-400">
                   Resource type
                 </label>
 
                 <select
+                  id="resource-type"
                   value={resourceType}
                   onChange={(e) =>
                     setResourceType(
@@ -156,11 +157,12 @@ spec:
               </div>
 
               <div>
-                <label className="mb-2 block text-sm text-zinc-400">
+                <label htmlFor="resource-name" className="mb-2 block text-sm text-zinc-400">
                   Name
                 </label>
 
                 <input
+                  id="resource-name"
                   value={name}
                   onChange={(e) => setName(e.target.value)}
                   className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-4 py-3 text-white outline-none focus:border-zinc-400"
@@ -168,11 +170,12 @@ spec:
               </div>
 
               <div>
-                <label className="mb-2 block text-sm text-zinc-400">
+                <label htmlFor="resource-namespace" className="mb-2 block text-sm text-zinc-400">
                   Namespace
                 </label>
 
                 <input
+                  id="resource-namespace"
                   value={namespace}
                   onChange={(e) =>
                     setNamespace(e.target.value)
@@ -184,11 +187,12 @@ spec:
               {resourceType === "deployment" && (
                 <>
                   <div>
-                    <label className="mb-2 block text-sm text-zinc-400">
+                    <label htmlFor="container-image" className="mb-2 block text-sm text-zinc-400">
                       Container image
                     </label>
 
                     <input
+                      id="container-image"
                       value={image}
                       onChange={(e) =>
                         setImage(e.target.value)
@@ -199,11 +203,12 @@ spec:
                   </div>
 
                   <div>
-                    <label className="mb-2 block text-sm text-zinc-400">
+                    <label htmlFor="replica-count" className="mb-2 block text-sm text-zinc-400">
                       Replicas
                     </label>
 
                     <input
+                      id="replica-count"
                       type="number"
                       min="1"
                       value={replicas}
@@ -219,11 +224,12 @@ spec:
               {resourceType !== "namespace" && (
                 <>
                   <div>
-                    <label className="mb-2 block text-sm text-zinc-400">
+                    <label htmlFor="container-port" className="mb-2 block text-sm text-zinc-400">
                       Container port
                     </label>
 
                     <input
+                      id="container-port"
                       type="number"
                       value={containerPort}
                       onChange={(e) =>
@@ -235,11 +241,12 @@ spec:
 
                   {resourceType === "service" && (
                     <div>
-                      <label className="mb-2 block text-sm text-zinc-400">
+                      <label htmlFor="service-port" className="mb-2 block text-sm text-zinc-400">
                         Service port
                       </label>
 
                       <input
+                        id="service-port"
                         type="number"
                         value={servicePort}
                         onChange={(e) =>

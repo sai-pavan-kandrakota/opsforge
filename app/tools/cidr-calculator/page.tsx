@@ -2,6 +2,8 @@
 
 import { useState } from "react";
 
+import SiteFooter from "@/app/components/SiteFooter";
+
 type CidrResult = {
   ip: string;
   cidr: number;
@@ -255,6 +257,8 @@ export default function CidrCalculator() {
           </section>
         )}
       </section>
+
+      <SiteFooter />
     </main>
   );
 }

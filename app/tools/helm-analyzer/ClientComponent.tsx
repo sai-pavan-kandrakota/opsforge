@@ -944,6 +944,7 @@ export default function HelmAnalyzerPage() {
                 setAnalyzed(false);
               }}
               spellCheck={false}
+              aria-label="Helm chart input"
               className="min-h-[560px] w-full resize-y rounded-xl border border-zinc-800 bg-zinc-950 p-4 font-mono text-sm leading-6 text-zinc-200 outline-none transition focus:border-zinc-500"
               placeholder="Paste Helm Chart.yaml, values.yaml, template YAML, or templated Kubernetes manifests here..."
             />
@@ -951,7 +952,7 @@ export default function HelmAnalyzerPage() {
             <div className="mt-4 flex flex-wrap gap-3">
               <button
                 onClick={runAnalysis}
-                className="rounded-lg bg-white px-5 py-2.5 text-sm font-medium text-black transition hover:bg-zinc-200"
+                className="rounded-lg bg-white px-5 py-2.5 text-sm font-medium text-zinc-950 transition hover:bg-zinc-200"
               >
                 Analyze Helm Chart
               </button>

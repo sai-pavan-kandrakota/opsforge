@@ -14,7 +14,7 @@ export const metadata: Metadata = {
 
 export default function Page() {
   return (
-    <main className="min-h-screen bg-slate-950 text-slate-100">
+    <main className="min-h-screen bg-zinc-950 text-white">
       <SiteHeader />
 
       <div className="mx-auto max-w-6xl px-4 py-8 md:px-6">
@@ -23,7 +23,7 @@ export default function Page() {
           <h1 className="mt-3 text-3xl font-bold text-white md:text-4xl">AWS IAM Policy Analyzer</h1>
         </header>
 
-        <div className="mb-8 rounded-xl border border-slate-800 bg-slate-900/70 p-5 text-sm text-slate-300 md:text-base">
+        <div className="mb-8 rounded-xl border border-zinc-800 bg-zinc-900/60 p-5 text-sm text-zinc-400 md:text-base">
           <p>
             Use this AWS IAM policy analyzer to review permission documents for the common patterns that lead to
             overly broad access. It is useful for engineers and security reviewers who need to spot wildcard actions,
@@ -32,9 +32,9 @@ export default function Page() {
           </p>
         </div>
 
-        <section className="mb-8 rounded-xl border border-slate-800 bg-slate-900/60 p-5">
-          <h2 className="mb-4 text-sm font-semibold uppercase tracking-[0.2em] text-slate-400">What it checks</h2>
-          <ul className="grid gap-2 text-sm text-slate-300 md:grid-cols-2">
+        <section className="mb-8 rounded-xl border border-zinc-800 bg-zinc-900/60 p-5">
+          <h2 className="mb-4 text-sm font-semibold uppercase tracking-[0.2em] text-zinc-500">What it checks</h2>
+          <ul className="grid gap-2 text-sm text-zinc-400 md:grid-cols-2">
             <li>• IAM policy JSON structure and versioning</li>
             <li>• Action = "*" and wildcard action patterns</li>
             <li>• Resource = "*" and wildcard resource use</li>
@@ -46,16 +46,16 @@ export default function Page() {
 
         <ClientComponent />
 
-        <section className="mt-8 rounded-xl border border-slate-800 bg-slate-900/60 p-5">
-          <h2 className="mb-4 text-sm font-semibold uppercase tracking-[0.2em] text-slate-400">Related tools</h2>
+        <section className="mt-8 rounded-xl border border-zinc-800 bg-zinc-900/60 p-5">
+          <h2 className="mb-4 text-sm font-semibold uppercase tracking-[0.2em] text-zinc-500">Related tools</h2>
           <div className="flex flex-wrap gap-3">
-            <Link href="/tools/terraform-analyzer" className="rounded-full border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-slate-200 transition hover:border-teal-500 hover:text-white">
+            <Link href="/tools/terraform-analyzer" className="rounded-full border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-300 transition hover:border-teal-500 hover:text-white">
               Terraform Analyzer
             </Link>
-            <Link href="/tools/kubernetes-analyzer" className="rounded-full border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-slate-200 transition hover:border-teal-500 hover:text-white">
+            <Link href="/tools/kubernetes-analyzer" className="rounded-full border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-300 transition hover:border-teal-500 hover:text-white">
               Kubernetes Analyzer
             </Link>
-            <Link href="/tools/github-actions-analyzer" className="rounded-full border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-slate-200 transition hover:border-teal-500 hover:text-white">
+            <Link href="/tools/github-actions-analyzer" className="rounded-full border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-300 transition hover:border-teal-500 hover:text-white">
               GitHub Actions Analyzer
             </Link>
           </div>

@@ -2057,44 +2057,11 @@ export default function KubernetesAnalyzer() {
   const resourcesCount = resources.length;
 
   return (
-    <main className="min-h-screen bg-zinc-950 text-white">
-      <header className="border-b border-zinc-800">
-        <div className="mx-auto flex max-w-7xl items-center justify-between px-6 py-5">
-          <a
-            href="/"
-            className="flex items-center gap-3"
-          >
-            <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-white font-bold text-zinc-950">
-              O
-            </div>
-
-            <span className="text-xl font-semibold">
-              OpsForge
-            </span>
-          </a>
-
-          <a
-            href="/"
-            className="text-sm text-zinc-400 hover:text-white"
-          >
-            ← All tools
-          </a>
-        </div>
-      </header>
-
+    <div className="min-h-screen bg-zinc-950 text-white">
       <section className="mx-auto max-w-7xl px-6 py-16">
         <div className="mb-10">
           <p className="text-sm font-medium uppercase tracking-widest text-zinc-500">
             Kubernetes · SRE
-          </p>
-
-          <h1 className="mt-3 text-4xl font-bold tracking-tight sm:text-5xl">
-            Kubernetes Manifest Analyzer
-          </h1>
-
-          <p className="mt-4 max-w-3xl text-lg leading-8 text-zinc-400">
-            Review Kubernetes Deployments for common reliability,
-            security, and production-readiness issues.
           </p>
         </div>
 
@@ -2124,6 +2091,7 @@ export default function KubernetesAnalyzer() {
               value={input}
               onChange={(e) => setInput(e.target.value)}
               spellCheck={false}
+              aria-label="Kubernetes manifest YAML input"
               placeholder="Paste Kubernetes YAML here..."
               className="min-h-[560px] w-full resize-y rounded-xl border border-zinc-700 bg-zinc-950 p-5 font-mono text-sm leading-6 text-zinc-200 outline-none focus:border-zinc-400"
             />
@@ -2324,13 +2292,6 @@ export default function KubernetesAnalyzer() {
           </p>
         </section>
       </section>
-
-      <footer className="border-t border-zinc-800">
-        <div className="mx-auto flex max-w-7xl justify-between px-6 py-8 text-sm text-zinc-500">
-          <span>© 2026 OpsForge</span>
-          <span>DevOps · Cloud · SRE</span>
-        </div>
-      </footer>
-    </main>
+    </div>
   );
 }

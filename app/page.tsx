@@ -3,6 +3,8 @@
 import { useMemo, useState } from "react";
 import type { FormEvent } from "react";
 
+import SiteFooter from "@/app/components/SiteFooter";
+
 const categoryOrder = [
   "NETWORKING",
   "DEVELOPER",
@@ -381,7 +383,7 @@ export default function Home() {
             {comingSoonTools.map((tool) => (
               <div
                 key={tool}
-                className="rounded-2xl border border-zinc-800 bg-zinc-950/80 p-4 text-sm text-zinc-300 shadow-inner shadow-black/20"
+                className="rounded-2xl border border-zinc-800 bg-zinc-950/80 p-4 text-sm text-zinc-300 shadow-inner shadow-zinc-950/20"
               >
                 <span className="inline-flex rounded-full border border-zinc-700 bg-zinc-900 px-2 py-1 text-[10px] font-medium uppercase tracking-[0.2em] text-zinc-500">
                   Soon
@@ -428,18 +430,7 @@ export default function Home() {
         </div>
       </section>
 
-      <footer className="border-t border-zinc-800 bg-zinc-950/90">
-        <div className="mx-auto flex max-w-7xl flex-col gap-4 px-4 py-8 text-sm text-zinc-500 sm:flex-row sm:items-center sm:justify-between sm:px-6 lg:px-8">
-          <p>© 2026 OpsForge. Built for engineers.</p>
-          <nav className="flex flex-wrap items-center gap-4 sm:gap-6">
-            <a href="/" className="transition hover:text-white">Home</a>
-            <a href="/about" className="transition hover:text-white">About</a>
-            <a href="/contact" className="transition hover:text-white">Contact</a>
-            <a href="/privacy" className="transition hover:text-white">Privacy</a>
-            <a href="/terms" className="transition hover:text-white">Terms</a>
-          </nav>
-        </div>
-      </footer>
+      <SiteFooter />
     </main>
   );
 }

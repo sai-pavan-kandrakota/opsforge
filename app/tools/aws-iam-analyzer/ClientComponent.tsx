@@ -825,18 +825,14 @@ export default function AwsIamAnalyzerPage() {
   };
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100">
+    <div className="min-h-screen bg-zinc-950 text-white">
       <div className="mx-auto max-w-7xl px-4 py-10 sm:px-6 lg:px-8">
-        <div className="mb-8 rounded-2xl border border-slate-800 bg-slate-900/80 p-6 shadow-2xl shadow-slate-950/60 backdrop-blur-sm">
-          <p className="mb-3 text-xs font-semibold uppercase tracking-[0.25em] text-cyan-400">OpsForge</p>
-          <h1 className="text-3xl font-bold tracking-tight text-white sm:text-4xl">AWS IAM Policy Analyzer</h1>
-          <p className="mt-3 max-w-3xl text-base text-slate-300">
-            Review IAM policies for excessive permissions, risky actions, and security best-practice issues.
-          </p>
+        <div className="mb-8 rounded-2xl border border-zinc-800 bg-zinc-900/80 p-6 shadow-xl shadow-zinc-950/40">
+          <p className="text-xs font-semibold uppercase tracking-[0.25em] text-cyan-400">OpsForge</p>
         </div>
 
         <div className="grid gap-6 lg:grid-cols-[1.3fr_0.7fr]">
-          <section className="rounded-2xl border border-slate-800 bg-slate-900/80 p-4 shadow-xl shadow-slate-950/40">
+          <section className="rounded-2xl border border-zinc-800 bg-zinc-900/80 p-4 shadow-xl shadow-zinc-950/40">
             <div className="mb-4 flex items-center justify-between gap-3">
               <h2 className="text-lg font-semibold text-white">IAM policy JSON</h2>
             </div>
@@ -845,7 +841,8 @@ export default function AwsIamAnalyzerPage() {
               value={input}
               onChange={(event) => setInput(event.target.value)}
               spellCheck={false}
-              className="h-[460px] w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-3 font-mono text-sm text-slate-100 outline-none transition focus:border-cyan-500 focus:ring-2 focus:ring-cyan-500/30"
+              aria-label="AWS IAM policy JSON input"
+              className="h-[460px] w-full rounded-xl border border-zinc-700 bg-zinc-950 px-4 py-3 font-mono text-sm text-zinc-200 outline-none transition focus:border-cyan-500 focus:ring-2 focus:ring-cyan-500/30"
               placeholder="Paste an AWS IAM policy JSON document here..."
             />
 
@@ -853,21 +850,21 @@ export default function AwsIamAnalyzerPage() {
               <button
                 type="button"
                 onClick={handleLoadExample}
-                className="rounded-lg border border-slate-700 bg-slate-800 px-4 py-2.5 text-sm font-medium text-slate-100 transition hover:border-cyan-500 hover:text-cyan-300"
+                className="rounded-lg border border-zinc-700 bg-zinc-800 px-4 py-2.5 text-sm font-medium text-zinc-300 transition hover:border-cyan-500 hover:text-cyan-300"
               >
                 Load example
               </button>
               <button
                 type="button"
                 onClick={handleAnalyze}
-                className="rounded-lg bg-cyan-500 px-4 py-2.5 text-sm font-semibold text-slate-950 transition hover:bg-cyan-400"
+                className="rounded-lg bg-cyan-500 px-4 py-2.5 text-sm font-semibold text-zinc-950 transition hover:bg-cyan-400"
               >
                 Analyze Policy
               </button>
               <button
                 type="button"
                 onClick={handleClear}
-                className="rounded-lg border border-slate-700 bg-slate-800 px-4 py-2.5 text-sm font-medium text-slate-200 transition hover:border-slate-500 hover:text-white"
+                className="rounded-lg border border-zinc-700 bg-zinc-800 px-4 py-2.5 text-sm font-medium text-zinc-300 transition hover:border-zinc-500 hover:text-white"
               >
                 Clear
               </button>
@@ -875,8 +872,8 @@ export default function AwsIamAnalyzerPage() {
           </section>
 
           <aside className="space-y-4">
-            <div className="rounded-2xl border border-slate-800 bg-slate-900/80 p-5 shadow-xl shadow-slate-950/40">
-              <h3 className="mb-4 text-sm font-semibold uppercase tracking-[0.2em] text-slate-400">Summary</h3>
+            <div className="rounded-2xl border border-zinc-800 bg-zinc-900/80 p-5 shadow-xl shadow-zinc-950/40">
+              <h3 className="mb-4 text-sm font-semibold uppercase tracking-[0.2em] text-zinc-500">Summary</h3>
               <div className="grid gap-3 sm:grid-cols-3 lg:grid-cols-1 xl:grid-cols-3">
                 {[
                   { label: "PASSED", value: summary.PASS, badge: "text-emerald-400", border: "border-emerald-500/30", bg: "bg-emerald-500/10" },
@@ -893,9 +890,9 @@ export default function AwsIamAnalyzerPage() {
               </div>
             </div>
 
-            <div className="rounded-2xl border border-slate-800 bg-slate-900/80 p-5 shadow-xl shadow-slate-950/40">
-              <h3 className="mb-3 text-sm font-semibold uppercase tracking-[0.2em] text-slate-400">Quick checks</h3>
-              <ul className="space-y-2 text-sm text-slate-300">
+            <div className="rounded-2xl border border-zinc-800 bg-zinc-900/80 p-5 shadow-xl shadow-zinc-950/40">
+              <h3 className="mb-3 text-sm font-semibold uppercase tracking-[0.2em] text-zinc-500">Quick checks</h3>
+              <ul className="space-y-2 text-sm text-zinc-400">
                 <li>• Avoid wildcard Action and Resource values unless explicitly required.</li>
                 <li>• Prefer scoped IAM actions and exact ARNs.</li>
                 <li>• Require MFA, IP, or VPC conditions for sensitive operations.</li>
@@ -905,19 +902,19 @@ export default function AwsIamAnalyzerPage() {
           </aside>
         </div>
 
-        <section className="mt-8 rounded-2xl border border-slate-800 bg-slate-900/80 p-5 shadow-xl shadow-slate-950/40">
+        <section className="mt-8 rounded-2xl border border-zinc-800 bg-zinc-900/80 p-5 shadow-xl shadow-zinc-950/40">
           <div className="mb-5 flex items-center justify-between gap-3">
             <h2 className="text-xl font-semibold text-white">Detailed findings</h2>
           </div>
 
           {results.length === 0 ? (
-            <div className="rounded-xl border border-dashed border-slate-700 bg-slate-950/40 p-6 text-sm text-slate-400">
+            <div className="rounded-xl border border-dashed border-zinc-700 bg-zinc-950/40 p-6 text-sm text-zinc-500">
               Run the analyzer to review the policy findings.
             </div>
           ) : (
             <div className="grid gap-4">
               {results.map((finding, index) => (
-                <div key={`${finding.title}-${index}`} className="rounded-xl border border-slate-800 bg-slate-950/40 p-4">
+                <div key={`${finding.title}-${index}`} className="rounded-xl border border-zinc-800 bg-zinc-950/40 p-4">
                   <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
                     <div className="text-base font-semibold text-white">{finding.title}</div>
                     <span
@@ -933,10 +930,10 @@ export default function AwsIamAnalyzerPage() {
                     </span>
                   </div>
 
-                  <p className="mt-3 text-sm leading-6 text-slate-300">{finding.description}</p>
+                  <p className="mt-3 text-sm leading-6 text-zinc-400">{finding.description}</p>
 
                   {finding.recommendation ? (
-                    <p className="mt-3 rounded-lg border border-slate-700 bg-slate-900/60 p-3 text-sm text-cyan-200">
+                    <p className="mt-3 rounded-lg border border-zinc-700 bg-zinc-900/60 p-3 text-sm text-cyan-200">
                       <span className="font-semibold text-cyan-300">Recommendation:</span> {finding.recommendation}
                     </p>
                   ) : null}

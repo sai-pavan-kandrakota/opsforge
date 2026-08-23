@@ -348,10 +348,12 @@ function analyzeGitHubActionsWorkflow(rawYaml: string): Finding[] {
 
   const hardcodedSecretPattern =
     /(?:password\s*[:=]\s*["'][^"']+["']|token\s*[:=]\s*["'][^"']+["']|secret\s*[:=]\s*["'][^"']+["']|\$\{\{\s*secrets\.[A-Z0-9_]+\s*\}\}|AWS_SECRET_ACCESS_KEY|GITHUB_TOKEN|ghp_[A-Za-z0-9]+)/gi;
-  const hardcodedSecretHits = rawYaml.match(hardcodedSecretPattern) || [];
+  const hardcodedSecretHits = (rawYaml.match(hardcodedSecretPattern) || []).filter(
+    (hit) => !/^\$\{\{\s*secrets\.[A-Z0-9_]+\s*\}\}$/i.test(hit)
+  );
   const suspiciousSecretInRun = /echo\s+["'].*(?:password|secret|token|key)=/i.test(rawYaml);
 
-  if (hardcodedSecretHits.length > 0 && !/secrets\.[A-Z0-9_]+/i.test(rawYaml)) {
+  if (hardcodedSecretHits.length > 0) {
     findings.push({
       title: "Hardcoded credentials or secrets detected",
       severity: "CRITICAL",

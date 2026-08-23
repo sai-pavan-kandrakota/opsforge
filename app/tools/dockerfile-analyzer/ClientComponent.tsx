@@ -145,7 +145,10 @@ export function analyzeDockerfile(dockerfile: string): Finding[] {
 
   const fromMatches = [...text.matchAll(/^\s*FROM\s+(?:--platform=\S+\s+)?([^\s]+)(?:\s+AS\s+\S+)?/gim)];
   const hasFrom = fromMatches.length > 0;
-  const hasUser = /^\s*USER\s+/im.test(text);
+  const finalStageText = fromMatches.length > 0
+    ? text.slice(fromMatches[fromMatches.length - 1].index ?? 0)
+    : text;
+  const hasUser = /^\s*USER\s+/im.test(finalStageText);
   const hasHealthcheck = /^\s*HEALTHCHECK\s+/im.test(text);
   const hasCopy = /^\s*COPY\s+/im.test(text);
   const hasAdd = /^\s*ADD\s+/im.test(text);
@@ -196,7 +199,7 @@ export function analyzeDockerfile(dockerfile: string): Finding[] {
     }
   }
 
-  const userInstructions = [...text.matchAll(/^\s*USER\s+([^\s]+).*$/gim)].map((match) => match[1].trim());
+  const userInstructions = [...finalStageText.matchAll(/^\s*USER\s+([^\s]+).*$/gim)].map((match) => match[1].trim());
   const lastUser = userInstructions[userInstructions.length - 1] || "";
 
   if (!hasUser) {

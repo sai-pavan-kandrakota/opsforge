@@ -739,8 +739,12 @@ function analyzeHelmChart(rawText: string): Finding[] {
     });
   }
 
+  const referenceBackedEnvEntry =
+    /-\s*name:\s*\S[^\n]*\n(?:[ \t]*\n)?[ \t]*valueFrom:\s*\n(?:(?!\s*-\s*name:)[ \t]+\S.*\n?)*/gi;
+  const textForPlaintextCheck = rawText.replace(referenceBackedEnvEntry, " ");
+
   const secretPatterns = /(password|secret|token|apiKey|api_key|accessKey|secretKey)/i;
-  const rawSecretMatches = secretPatterns.test(rawText);
+  const rawSecretMatches = secretPatterns.test(textForPlaintextCheck);
   if (rawSecretMatches) {
     findings.push({
       title: "Potential plaintext credentials",

@@ -89,6 +89,15 @@ function isValidField(
   const parts = value.split(",");
 
   return parts.every((part) => {
+    // A comma-separated list with an empty or whitespace-only segment (e.g.
+    // "5,,10", a leading/trailing comma, or "5, ,10") is malformed cron
+    // syntax. Number("") and Number(" ") both coerce to 0, which is within
+    // range for any field whose minimum is 0 (minute, hour, day-of-week),
+    // so this must be rejected before it ever reaches numeric parsing below.
+    if (part.trim() === "") {
+      return false;
+    }
+
     if (part.startsWith("*/")) {
       const step = Number(part.slice(2));
       return Number.isInteger(step) && step > 0 && step <= max;

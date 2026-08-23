@@ -173,6 +173,26 @@ function stripYamlComments(rawYaml: string): string {
   return result;
 }
 
+// Normalizes a `permissions:` value into the { scope: level } object shape.
+// GitHub Actions also allows the string shorthand `write-all` / `read-all`
+// in addition to the per-scope object form; both are represented here as a
+// single synthetic `all` scope so the existing object-based permission
+// checks (broad-privilege detection, write-permission detection) handle the
+// shorthand the same way they already handle the object form, without any
+// other logic needing to know about the string form. Any other value
+// (object, null/undefined, or an unrecognized string) is left as-is /
+// discarded to {}, matching the prior behavior for those cases exactly.
+function normalizePermissions(value: unknown): Record<string, unknown> {
+  if (typeof value === "string") {
+    const lowered = value.trim().toLowerCase();
+    if (lowered === "write-all") return { all: "write" };
+    if (lowered === "read-all") return { all: "read" };
+    return {};
+  }
+
+  return value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+}
+
 function analyzeGitHubActionsWorkflow(rawYaml: string): Finding[] {
   rawYaml = rawYaml || "";
 
@@ -350,7 +370,7 @@ function analyzeGitHubActionsWorkflow(rawYaml: string): Finding[] {
   }
 
   const rawPermissions = parsed.permissions;
-  const permissionsValue = rawPermissions && typeof rawPermissions === "object" ? rawPermissions as Record<string, unknown> : {};
+  const permissionsValue = normalizePermissions(rawPermissions);
   const permissionKeys = Object.keys(permissionsValue);
 
   if (permissionKeys.length > 0) {
@@ -437,11 +457,11 @@ function analyzeGitHubActionsWorkflow(rawYaml: string): Finding[] {
     return jobIf.toLowerCase().includes("pull_request") || jobObject["if"] === "github.event_name == 'pull_request'";
   });
 
-  const dangerousPrWrite = jobsArray.filter(([jobName, job]) => {
+  const dangerousPrWrite = pullRequestJobs.filter(([_, job]) => {
     const jobObject = job && typeof job === "object" ? (job as Record<string, unknown>) : {};
-    const permissions = jobObject.permissions && typeof jobObject.permissions === "object" ? (jobObject.permissions as Record<string, unknown>) : {};
+    const permissions = normalizePermissions(jobObject.permissions);
     const permissionValues = Object.values(permissions);
-    return permissionValues.some((value) => String(value).toLowerCase() === "write") && /pull_request|pr/i.test(jobName);
+    return permissionValues.some((value) => String(value).toLowerCase() === "write");
   });
 
   if (pullRequestJobs.length > 0 && dangerousPrWrite.length > 0) {
@@ -465,7 +485,7 @@ function analyzeGitHubActionsWorkflow(rawYaml: string): Finding[] {
     });
   }
 
-  const usesPullRequestTarget = /pull_request_target/i.test(rawYaml);
+  const usesPullRequestTarget = /pull_request_target/i.test(secretDetectionText);
   if (usesPullRequestTarget) {
     findings.push({
       title: "pull_request_target is used",
@@ -482,7 +502,7 @@ function analyzeGitHubActionsWorkflow(rawYaml: string): Finding[] {
   }
 
   const usesThirdPartyActions = /uses:\s*[^\n]+@[^\s]+/gim;
-  const actionMatches = rawYaml.match(usesThirdPartyActions) || [];
+  const actionMatches = secretDetectionText.match(usesThirdPartyActions) || [];
   const unpinnedActions = actionMatches.filter((action) => {
     const trimmed = action.replace(/^uses:\s*/i, "").trim();
     return trimmed.includes("@main") || trimmed.includes("@master") || trimmed.includes("@latest") || trimmed.includes("@dev");
@@ -588,7 +608,7 @@ function analyzeGitHubActionsWorkflow(rawYaml: string): Finding[] {
   }
 
   const suspiciousLogsPattern = /echo\s+["'].*\$\{\{\s*(?:secrets|github\.token|github\.event|env\.)/i;
-  if (suspiciousLogsPattern.test(rawYaml)) {
+  if (suspiciousLogsPattern.test(secretDetectionText)) {
     findings.push({
       title: "Workflow may expose sensitive values in logs",
       severity: "CRITICAL",

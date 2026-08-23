@@ -406,53 +406,35 @@ function analyzeIamPolicy(terraformText: string): Finding[] {
   return findings;
 }
 
-// Scans `sgBlockText` for `ingress {` headers, treating `#`/`//` line
-// comments, `/* */` block comments, and `"..."` strings as opaque (mirrors
-// getResourceBlocks), and extracts each as a brace-balanced block via
-// extractBalancedBlock. This avoids the truncation a plain
-// `/ingress\s*\{[\s\S]*?\}/` regex suffers when a quoted string value (e.g. a
-// `description` field) contains a literal `}` — the regex has no notion of
-// "inside a string" and stops at the first `}` it sees, balanced or not.
+// Collects both normal `ingress { ... }` blocks and `dynamic "ingress" { ...
+// content { ... } }` blocks from `sgBlockText`, treating `#`/`//` line
+// comments, `/* */` block comments, and `"..."` strings as opaque throughout
+// (via scanBalancedBlocks), and extracting each as a brace-balanced block.
+// This avoids the truncation a plain `/ingress\s*\{[\s\S]*?\}/` regex
+// suffers when a quoted string value (e.g. a `description` field) contains
+// a literal `}` — the regex has no notion of "inside a string" and stops at
+// the first `}` it sees, balanced or not.
+//
+// For a `dynamic "ingress"` block, the wrapper itself (`for_each`,
+// `iterator`) is not a rule — only the nested `content { ... }` block holds
+// the actual ingress fields (`cidr_blocks`, `from_port`, etc.), so that is
+// what gets returned as the effective ingress block. The plain `ingress {`
+// scan never matches inside `dynamic "ingress" {` because the scan skips
+// over the quoted `"ingress"` text as an opaque string literal before it
+// could attempt a bare-keyword match there, so the two scans never overlap
+// or double-count the same rule.
 function getIngressBlocks(sgBlockText: string): string[] {
-  const headerPattern = /ingress\s*\{/iy;
   const blocks: string[] = [];
-  let index = 0;
 
-  while (index < sgBlockText.length) {
-    const char = sgBlockText[index];
-    const nextChar = sgBlockText[index + 1];
+  scanBalancedBlocks(sgBlockText, /ingress\s*\{/iy, (_match, ingressBlock) => {
+    blocks.push(ingressBlock);
+  });
 
-    if (char === '"') {
-      index = skipStringLiteral(sgBlockText, index);
-      continue;
-    }
-
-    if (char === "#" || (char === "/" && nextChar === "/")) {
-      index = skipLineComment(sgBlockText, index);
-      continue;
-    }
-
-    if (char === "/" && nextChar === "*") {
-      index = skipBlockComment(sgBlockText, index);
-      continue;
-    }
-
-    headerPattern.lastIndex = index;
-    const match = headerPattern.exec(sgBlockText);
-
-    if (match) {
-      const openingBraceIndex = index + match[0].lastIndexOf("{");
-      const ingressBlock = extractBalancedBlock(sgBlockText, openingBraceIndex);
-
-      if (ingressBlock !== null) {
-        blocks.push(ingressBlock);
-        index = openingBraceIndex + ingressBlock.length;
-        continue;
-      }
-    }
-
-    index += 1;
-  }
+  scanBalancedBlocks(sgBlockText, /dynamic\s+"ingress"\s*\{/iy, (_match, dynamicBlock) => {
+    scanBalancedBlocks(dynamicBlock, /content\s*\{/iy, (_contentMatch, contentBlock) => {
+      blocks.push(contentBlock);
+    });
+  });
 
   return blocks;
 }
@@ -465,7 +447,7 @@ function analyzeSecurityGroups(terraformText: string): Finding[] {
     return findings;
   }
 
-  const publicExposureIssues: string[] = [];
+  const publicExposureIssues: { text: string; isCritical: boolean }[] = [];
   const criticalPorts = new Set([22, 3389, 3306, 5432, 6379, 1433, 27017, 1521]);
 
   for (const block of sgBlocks) {
@@ -493,22 +475,15 @@ function analyzeSecurityGroups(terraformText: string): Finding[] {
           ? `${fromPort}`
           : "unknown range";
 
-      const isRangeOpen =
-        fromPort !== null && toPort !== null && (fromPort === 0 || toPort === 65535 || fromPort < toPort);
       const hasCriticalPort =
         fromPort !== null && toPort !== null &&
         (criticalPorts.has(fromPort) || criticalPorts.has(toPort) ||
           (fromPort < 65535 && toPort > 0 && (fromPort <= 22 && toPort >= 22 || fromPort <= 3389 && toPort >= 3389 || fromPort <= 3306 && toPort >= 3306 || fromPort <= 5432 && toPort >= 5432 || fromPort <= 6379 && toPort >= 6379 || fromPort <= 1433 && toPort >= 1433 || fromPort <= 27017 && toPort >= 27017 || fromPort <= 1521 && toPort >= 1521)));
 
-      if (hasCriticalPort || isRangeOpen) {
-        publicExposureIssues.push(
-          `Public ingress on ${rangeLabel} is open to 0.0.0.0/0 or ::/0.`,
-        );
-      } else {
-        publicExposureIssues.push(
-          `Public ingress on ${rangeLabel} is open to 0.0.0.0/0 or ::/0.`,
-        );
-      }
+      publicExposureIssues.push({
+        text: `Public ingress on ${rangeLabel} is open to 0.0.0.0/0 or ::/0.`,
+        isCritical: hasCriticalPort,
+      });
     }
   }
 
@@ -523,9 +498,7 @@ function analyzeSecurityGroups(terraformText: string): Finding[] {
     return findings;
   }
 
-  const highestSeverity = publicExposureIssues.some((issue) =>
-    /22|3389|3306|5432|6379|1433|27017|1521/.test(issue),
-  )
+  const highestSeverity = publicExposureIssues.some((issue) => issue.isCritical)
     ? "CRITICAL"
     : "WARNING";
 
@@ -538,7 +511,7 @@ function analyzeSecurityGroups(terraformText: string): Finding[] {
     category: "Networking",
     description:
       publicExposureIssues.length > 0
-        ? `The supplied Terraform contains public ingress rules with broad exposure: ${publicExposureIssues.join(" ")}`
+        ? `The supplied Terraform contains public ingress rules with broad exposure: ${publicExposureIssues.map((issue) => issue.text).join(" ")}`
         : "Unable to fully verify this configuration from the supplied Terraform.",
     recommendation:
       highestSeverity === "CRITICAL"
@@ -547,6 +520,80 @@ function analyzeSecurityGroups(terraformText: string): Finding[] {
   });
 
   return findings;
+}
+
+// Resolves each `resource "<resourceType>" "<name>" { ... }` block to its
+// Terraform local name, keyed by name. Reuses getResourceBlocks for the
+// actual (comment/string-safe, brace-balanced) block extraction; a second,
+// equally comment/string-safe scanBalancedBlocks pass over the same text
+// captures each block's local name in the same scan order, so the two
+// results line up index-for-index. (Same technique as the RDS fix's
+// getSecurityGroupBlocksByName, generalized to an arbitrary resource type.)
+function getResourceBlocksByName(terraformText: string, resourceType: string): Map<string, string> {
+  const blocks = getResourceBlocks(terraformText, resourceType);
+  const names: string[] = [];
+
+  scanBalancedBlocks(
+    terraformText,
+    new RegExp(`resource\\s+"${resourceType}"\\s+"([^"]+)"\\s*\\{`, "iy"),
+    (headerMatch) => {
+      names.push(headerMatch[1]);
+    },
+  );
+
+  const blocksByName = new Map<string, string>();
+
+  names.forEach((name, index) => {
+    const block = blocks[index];
+    if (block !== undefined) {
+      blocksByName.set(name, block);
+    }
+  });
+
+  return blocksByName;
+}
+
+// Returns the set of aws_s3_bucket local names that have a
+// server_side_encryption_configuration resource referencing them via
+// `bucket = aws_s3_bucket.<name>.id`. A reference only satisfies that exact
+// bucket — an unrelated bucket's reference, or an unresolved reference (a
+// literal string, a data source, a module output), satisfies nothing.
+function getBucketsWithSeparateEncryption(encryptionBlocksByName: Map<string, string>): Set<string> {
+  const satisfiedBuckets = new Set<string>();
+
+  for (const block of encryptionBlocksByName.values()) {
+    const bucketRefMatch = block.match(/bucket\s*=\s*aws_s3_bucket\.([A-Za-z_][A-Za-z0-9_-]*)\.id/i);
+
+    if (bucketRefMatch) {
+      satisfiedBuckets.add(bucketRefMatch[1]);
+    }
+  }
+
+  return satisfiedBuckets;
+}
+
+// Same bucket correlation as getBucketsWithSeparateEncryption, but for
+// aws_s3_bucket_versioning resources — and only counts a reference as
+// satisfying its bucket when the resource's own versioning_configuration is
+// actually enabled, mirroring the inline `enabled = true` requirement.
+function getBucketsWithSeparateVersioning(versioningBlocksByName: Map<string, string>): Set<string> {
+  const satisfiedBuckets = new Set<string>();
+
+  for (const block of versioningBlocksByName.values()) {
+    const isEnabled = /versioning_configuration\s*\{[\s\S]*?status\s*=\s*["']Enabled["']/i.test(block);
+
+    if (!isEnabled) {
+      continue;
+    }
+
+    const bucketRefMatch = block.match(/bucket\s*=\s*aws_s3_bucket\.([A-Za-z_][A-Za-z0-9_-]*)\.id/i);
+
+    if (bucketRefMatch) {
+      satisfiedBuckets.add(bucketRefMatch[1]);
+    }
+  }
+
+  return satisfiedBuckets;
 }
 
 function analyzeS3Buckets(terraformText: string): Finding[] {
@@ -561,21 +608,31 @@ function analyzeS3Buckets(terraformText: string): Finding[] {
     return findings;
   }
 
+  const s3BucketsByName = getResourceBlocksByName(terraformText, "aws_s3_bucket");
+  const bucketsWithSeparateEncryption = getBucketsWithSeparateEncryption(
+    getResourceBlocksByName(terraformText, "aws_s3_bucket_server_side_encryption_configuration"),
+  );
+  const bucketsWithSeparateVersioning = getBucketsWithSeparateVersioning(
+    getResourceBlocksByName(terraformText, "aws_s3_bucket_versioning"),
+  );
+
   let publicAccessPattern = false;
   let encryptionIssue = false;
   let versioningIssue = false;
 
-  for (const bucket of s3Buckets) {
+  for (const [bucketName, bucket] of s3BucketsByName) {
     if (/acl\s*=\s*["'](?:public-read|public-read-write|authenticated-read)["']/i.test(bucket)) {
       publicAccessPattern = true;
     }
     if (/policy\s*=\s*.*\*.*|Principal\s*:\s*\*|aws:\s*\*|\[\s*"\*"\s*\]/i.test(bucket)) {
       publicAccessPattern = true;
     }
-    if (!/server_side_encryption_configuration|bucket_key_enabled|kms_master_key_id/i.test(bucket)) {
+    const hasInlineEncryption = /server_side_encryption_configuration|bucket_key_enabled|kms_master_key_id/i.test(bucket);
+    if (!hasInlineEncryption && !bucketsWithSeparateEncryption.has(bucketName)) {
       encryptionIssue = true;
     }
-    if (!/versioning\s*\{[\s\S]*?enabled\s*=\s*true/i.test(bucket)) {
+    const hasInlineVersioning = /versioning\s*\{[\s\S]*?enabled\s*=\s*true/i.test(bucket);
+    if (!hasInlineVersioning && !bucketsWithSeparateVersioning.has(bucketName)) {
       versioningIssue = true;
     }
   }
@@ -659,6 +716,79 @@ function analyzeS3Buckets(terraformText: string): Finding[] {
   return findings;
 }
 
+// Resolves each `resource "aws_security_group" "<name>" { ... }` block to
+// its Terraform local name, keyed by name. Reuses getResourceBlocks for the
+// actual (comment/string-safe, brace-balanced) block extraction; a second,
+// equally comment/string-safe scanBalancedBlocks pass over the same text
+// captures each block's local name in the same scan order, so the two
+// results line up index-for-index.
+function getSecurityGroupBlocksByName(terraformText: string): Map<string, string> {
+  const blocks = getResourceBlocks(terraformText, "aws_security_group");
+  const names: string[] = [];
+
+  scanBalancedBlocks(
+    terraformText,
+    /resource\s+"aws_security_group"\s+"([^"]+)"\s*\{/iy,
+    (headerMatch) => {
+      names.push(headerMatch[1]);
+    },
+  );
+
+  const blocksByName = new Map<string, string>();
+
+  names.forEach((name, index) => {
+    const block = blocks[index];
+    if (block !== undefined) {
+      blocksByName.set(name, block);
+    }
+  });
+
+  return blocksByName;
+}
+
+// Determines whether an aws_db_instance block's own attached security
+// group(s) — resolved from direct `aws_security_group.<name>.id` references
+// inside its `vpc_security_group_ids` attribute — allow public ingress
+// (0.0.0.0/0 or ::/0), using getIngressBlocks for the actual ingress-rule
+// extraction. Unlike a whole-file scan, this only considers the specific
+// security group(s) this instance actually references. If no direct
+// reference can be resolved, this returns false rather than guessing, so
+// the caller falls back to the safe WARNING severity.
+function hasResolvedPublicSecurityGroupExposure(
+  dbBlock: string,
+  securityGroupBlocksByName: Map<string, string>,
+): boolean {
+  const vpcSgIdsMatch = dbBlock.match(/vpc_security_group_ids\s*=\s*\[([^\]]*)\]/i);
+
+  if (!vpcSgIdsMatch) {
+    return false;
+  }
+
+  const referencedNames = new Set<string>();
+  const referencePattern = /aws_security_group\.([A-Za-z_][A-Za-z0-9_-]*)\.id/g;
+  let referenceMatch: RegExpExecArray | null;
+
+  while ((referenceMatch = referencePattern.exec(vpcSgIdsMatch[1])) !== null) {
+    referencedNames.add(referenceMatch[1]);
+  }
+
+  const resolvedSecurityGroupBlocks = Array.from(referencedNames)
+    .map((name) => securityGroupBlocksByName.get(name))
+    .filter((sgBlock): sgBlock is string => sgBlock !== undefined);
+
+  if (resolvedSecurityGroupBlocks.length === 0) {
+    return false;
+  }
+
+  return resolvedSecurityGroupBlocks.some((sgBlock) =>
+    getIngressBlocks(sgBlock).some(
+      (ingressBlock) =>
+        /cidr_blocks\s*=\s*\[[\s\S]*?(?:"0\.0\.0\.0\/0"|"::\/0")[\s\S]*\]/i.test(ingressBlock) ||
+        /ipv6_cidr_blocks\s*=\s*\[[\s\S]*?"::\/0"[\s\S]*\]/i.test(ingressBlock),
+    ),
+  );
+}
+
 function analyzeRds(terraformText: string): Finding[] {
   const findings: Finding[] = [];
   const dbBlocks = getResourceBlocks(terraformText, "aws_db_instance");
@@ -667,9 +797,11 @@ function analyzeRds(terraformText: string): Finding[] {
     return findings;
   }
 
+  const securityGroupBlocksByName = getSecurityGroupBlocksByName(terraformText);
+
   for (const block of dbBlocks) {
     const hasPubliclyAccessible = /publicly_accessible\s*=\s*true/i.test(block);
-    const hasPublicSecurityExposure = /cidr_blocks\s*=\s*\[[\s\S]*?(?:"0\.0\.0\.0\/0"|"::\/0")[\s\S]*\]/i.test(terraformText);
+    const hasPublicSecurityExposure = hasResolvedPublicSecurityGroupExposure(block, securityGroupBlocksByName);
 
     if (hasPubliclyAccessible) {
       findings.push({
@@ -677,8 +809,8 @@ function analyzeRds(terraformText: string): Finding[] {
         severity: hasPublicSecurityExposure ? "CRITICAL" : "WARNING",
         category: "Security",
         description: hasPublicSecurityExposure
-          ? "The supplied Terraform sets publicly_accessible = true and also exposes a public ingress path in the same configuration, making public database exposure plausible."
-          : "The supplied Terraform sets publicly_accessible = true. This does not prove a public security group rule is present, but it indicates a public database configuration that needs review.",
+          ? "The supplied Terraform sets publicly_accessible = true and its attached security group also allows public ingress (0.0.0.0/0 or ::/0), making public database exposure plausible."
+          : "The supplied Terraform sets publicly_accessible = true. This does not prove a public security group rule is present on the instance's own attached security group, but it indicates a public database configuration that needs review.",
         recommendation:
           "Keep the database private unless there is a clear operational reason for public access, and restrict it to trusted networks or private endpoints.",
       });
@@ -851,6 +983,48 @@ function analyzeProviderVersionPinning(terraformText: string): Finding[] {
   return findings;
 }
 
+// Scans `text` for the first match of `attributePattern` (a sticky regex),
+// treating `#`/`//` line comments, `/* */` block comments, and `"..."`
+// strings as opaque along the way — mirrors the scan loop already used by
+// getResourceBlocks/scanBalancedBlocks, but for a simple attribute match
+// rather than a brace-balanced block. This ensures an attribute that only
+// *appears* inside a comment or an unrelated quoted string is never
+// mistaken for the real attribute.
+function findAttributeMatch(text: string, attributePattern: RegExp): RegExpExecArray | null {
+  let index = 0;
+
+  while (index < text.length) {
+    const char = text[index];
+    const nextChar = text[index + 1];
+
+    if (char === '"') {
+      index = skipStringLiteral(text, index);
+      continue;
+    }
+
+    if (char === "#" || (char === "/" && nextChar === "/")) {
+      index = skipLineComment(text, index);
+      continue;
+    }
+
+    if (char === "/" && nextChar === "*") {
+      index = skipBlockComment(text, index);
+      continue;
+    }
+
+    attributePattern.lastIndex = index;
+    const match = attributePattern.exec(text);
+
+    if (match) {
+      return match;
+    }
+
+    index += 1;
+  }
+
+  return null;
+}
+
 function analyzeModuleVersionPinning(terraformText: string): Finding[] {
   const findings: Finding[] = [];
   const moduleBlocks = terraformText.match(/module\s+"[^"]+"\s*\{[\s\S]*?\}/gim) || [];
@@ -871,8 +1045,11 @@ function analyzeModuleVersionPinning(terraformText: string): Finding[] {
       continue;
     }
 
-    const versionConstraint = /version\s*=\s*["'][^"']+["']/i.test(block);
-    const hasBroadConstraint = /version\s*=\s*["']\s*(?:>=\s*0|>=\s*1|~>\s*0|~>\s*1|\*|\s*"\s*)/i.test(block);
+    const versionMatch = findAttributeMatch(block, /version\s*=\s*["'][^"']+["']/iy);
+    const versionConstraint = versionMatch !== null;
+    const hasBroadConstraint =
+      versionMatch !== null &&
+      /version\s*=\s*["']\s*(?:>=\s*0|>=\s*1|~>\s*0|~>\s*1|\*|\s*"\s*)/i.test(versionMatch[0]);
 
     if (!versionConstraint || hasBroadConstraint) {
       findings.push({

@@ -4,6 +4,15 @@ import { useState } from "react";
 
 type ResourceType = "deployment" | "service" | "namespace";
 
+// Serializes a user-controlled value as a YAML double-quoted string scalar.
+// JSON's string-literal escaping (quotes, backslashes, control characters)
+// is syntactically valid YAML double-quoted scalar escaping, so this is
+// sufficient without a custom escaper - it also means a colon, `#`, or
+// embedded newline inside the value can never be misread as YAML syntax.
+function yamlString(value: string): string {
+  return JSON.stringify(value);
+}
+
 export default function KubernetesGenerator() {
   const [resourceType, setResourceType] =
     useState<ResourceType>("deployment");
@@ -21,18 +30,18 @@ export default function KubernetesGenerator() {
       return `apiVersion: v1
 kind: Namespace
 metadata:
-  name: ${namespace}`;
+  name: ${yamlString(namespace)}`;
     }
 
     if (resourceType === "service") {
       return `apiVersion: v1
 kind: Service
 metadata:
-  name: ${name}
-  namespace: ${namespace}
+  name: ${yamlString(name)}
+  namespace: ${yamlString(namespace)}
 spec:
   selector:
-    app: ${name}
+    app: ${yamlString(name)}
   ports:
     - protocol: TCP
       port: ${servicePort}
@@ -43,21 +52,21 @@ spec:
     return `apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: ${name}
-  namespace: ${namespace}
+  name: ${yamlString(name)}
+  namespace: ${yamlString(namespace)}
 spec:
   replicas: ${replicas}
   selector:
     matchLabels:
-      app: ${name}
+      app: ${yamlString(name)}
   template:
     metadata:
       labels:
-        app: ${name}
+        app: ${yamlString(name)}
     spec:
       containers:
-        - name: ${name}
-          image: ${image}
+        - name: ${yamlString(name)}
+          image: ${yamlString(image)}
           ports:
             - containerPort: ${containerPort}`;
   }

@@ -356,6 +356,11 @@ function analyzePolicy(policyText: string): Finding[] {
   const assumeRole = newBucket();
   const sensitiveActionWithWildcardResource = newBucket();
 
+  // Whether ANY Allow + iam:PassRole statement pairs the action with a
+  // wildcard Resource — the actual privilege-escalation condition, tracked
+  // directly from the resource fact rather than inferred from the Sid text.
+  let passRoleAllowHasWildcardResource = false;
+
   statements.forEach((statement, index) => {
     const sid = statement.Sid || `Statement ${index + 1}`;
     const effect = getEffectKind(statement);
@@ -420,6 +425,9 @@ function analyzePolicy(policyText: string): Finding[] {
 
       if (actionsLower.some((action) => action === "iam:passrole")) {
         recordEffect(passRole, effect, sid);
+        if (effect === "allow" && resourceHasWildcard) {
+          passRoleAllowHasWildcardResource = true;
+        }
       }
 
       if (actionsLower.some((action) => action === "sts:assumerole")) {
@@ -665,7 +673,7 @@ function analyzePolicy(policyText: string): Finding[] {
   if (passRole.allow.length > 0) {
     findings.push({
       title: "PassRole permission",
-      severity: passRole.allow.some((statementId) => statementId.includes("*")) ? "CRITICAL" : "WARNING",
+      severity: passRoleAllowHasWildcardResource ? "CRITICAL" : "WARNING",
       description: `iam:PassRole appears in Allow statement(s): ${passRole.allow.join(", ")}.`,
       recommendation: "Limit PassRole to the exact role ARNs required, and do not permit a broad resource wildcard for it.",
     });

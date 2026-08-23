@@ -234,6 +234,59 @@ function containsSecretLikeText(text: string): boolean {
   return /(password|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|client[_-]?secret)/.test(lower);
 }
 
+// Returns `rawText` with `#` line comments removed, treating single- and
+// double-quoted string content as opaque so a `#` inside a quoted value is
+// never mistaken for a comment start. Scoped only for use by the
+// plaintext-credential check below - this does not affect how the rest of
+// analyzeHelmChart parses or reads the chart.
+function stripYamlComments(rawText: string): string {
+  let result = "";
+  let index = 0;
+
+  while (index < rawText.length) {
+    const char = rawText[index];
+
+    if (char === '"' || char === "'") {
+      const quote = char;
+      let end = index + 1;
+
+      while (end < rawText.length) {
+        if (quote === '"' && rawText[end] === "\\") {
+          end += 2;
+          continue;
+        }
+        if (rawText[end] === quote) {
+          if (quote === "'" && rawText[end + 1] === "'") {
+            end += 2;
+            continue;
+          }
+          end += 1;
+          break;
+        }
+        end += 1;
+      }
+
+      result += rawText.slice(index, end);
+      index = end;
+      continue;
+    }
+
+    if (char === "#") {
+      const newlineIndex = rawText.indexOf("\n", index);
+      if (newlineIndex === -1) {
+        break;
+      }
+      index = newlineIndex;
+      continue;
+    }
+
+    result += char;
+    index += 1;
+  }
+
+  return result;
+}
+
 function analyzeHelmChart(rawText: string): Finding[] {
   rawText = rawText || "";
 
@@ -741,7 +794,35 @@ function analyzeHelmChart(rawText: string): Finding[] {
 
   const referenceBackedEnvEntry =
     /-\s*name:\s*\S[^\n]*\n(?:[ \t]*\n)?[ \t]*valueFrom:\s*\n(?:(?!\s*-\s*name:)[ \t]+\S.*\n?)*/gi;
-  const textForPlaintextCheck = rawText.replace(referenceBackedEnvEntry, " ");
+
+  // Flow-style per-var valueFrom: { secretKeyRef: {...} } / { configMapKeyRef: {...} }.
+  // Schema-precise (K8s EnvVarSource has exactly one of secretKeyRef/
+  // configMapKeyRef, each a flat object) rather than a generic brace
+  // matcher. Every internal gap uses [ \t]* (never \s*) and [^{}\n]* so
+  // nothing here can cross a line boundary - a malformed or unusually
+  // formatted multi-line flow mapping simply fails to match (the safe
+  // direction: it falls through to the plain substring check below) rather
+  // than risking an unbounded span into unrelated content.
+  const flowStyleValueFromEntry =
+    /-\s*name:\s*\S[^\n]*\n(?:[ \t]*\n)?[ \t]*valueFrom:[ \t]*\{[ \t]*(?:secretKeyRef|configMapKeyRef)[ \t]*:[ \t]*\{[^{}\n]*\}[ \t]*\}[^\n]*\n?/gi;
+
+  // Block-style envFrom entry (- secretRef: / - configMapRef:). The
+  // continuation only consumes subsequent lines that are themselves flat
+  // "key: value" sub-fields (e.g. name:, optional:) on a single line -
+  // using [ \t]* (not \s*) around the colon so the match can never cross a
+  // newline and misread a later, unrelated line as this entry's own value.
+  const safeEnvFromEntryBlock =
+    /-[ \t]*(?:secretRef|configMapRef)[ \t]*:[ \t]*\n(?:[ \t]+[A-Za-z_][\w.-]*[ \t]*:[ \t]*\S[^\n]*\n?)*/gi;
+
+  // Flow-style envFrom entry (- secretRef: {...} / - configMapRef: {...}).
+  const safeEnvFromEntryFlow =
+    /-[ \t]*(?:secretRef|configMapRef)[ \t]*:[ \t]*\{[^{}\n]*\}[^\n]*\n?/gi;
+
+  const textForPlaintextCheck = stripYamlComments(rawText)
+    .replace(referenceBackedEnvEntry, " ")
+    .replace(flowStyleValueFromEntry, " ")
+    .replace(safeEnvFromEntryBlock, " ")
+    .replace(safeEnvFromEntryFlow, " ");
 
   const secretPatterns = /(password|secret|token|apiKey|api_key|accessKey|secretKey)/i;
   const rawSecretMatches = secretPatterns.test(textForPlaintextCheck);

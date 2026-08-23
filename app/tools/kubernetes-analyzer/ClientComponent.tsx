@@ -1575,9 +1575,16 @@ function analyzeRbac(document: any): Check[] {
       verbs.includes("*");
 
     if (isWildcardRule) {
+      // The core Kubernetes API group (Pods, Secrets, ConfigMaps,
+      // ServiceAccounts, Namespaces, etc.) is represented as an empty
+      // string, not "*" - so a rule granting resources:"*" and verbs:"*"
+      // on the core group is just as unrestricted as apiGroups:"*" and
+      // must escalate to critical the same way.
+      const grantsAllApiGroups = apiGroups.includes("*") || apiGroups.includes("");
+
       checks.push({
         title: `${kind} rule ${index + 1}`,
-        severity: apiGroups.includes("*") && resources.includes("*") && verbs.includes("*") ? "critical" : "warning",
+        severity: grantsAllApiGroups && resources.includes("*") && verbs.includes("*") ? "critical" : "warning",
         description: `${kind} ${name} in namespace ${namespace} includes a broad wildcard rule: ${ruleText}.`,
         recommendation: "Limit RBAC permissions to the specific resources and verbs required by the workload or controller.",
       });

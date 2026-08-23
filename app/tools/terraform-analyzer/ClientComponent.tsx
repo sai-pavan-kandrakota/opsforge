@@ -724,17 +724,87 @@ function analyzeRds(terraformText: string): Finding[] {
   return findings;
 }
 
+// Scans `text` for occurrences of `headerPattern` (a sticky regex whose
+// match ends with the block's opening `{`), treating `#`/`//` line
+// comments, `/* */` block comments, and `"..."` strings as opaque, and
+// invokes `onMatch` with each header match and its brace-balanced block body
+// (via extractBalancedBlock). Generalizes the scan loop already used by
+// getResourceBlocks/getIngressBlocks to an arbitrary header pattern.
+function scanBalancedBlocks(
+  text: string,
+  headerPattern: RegExp,
+  onMatch: (headerMatch: RegExpExecArray, block: string) => void,
+): void {
+  let index = 0;
+
+  while (index < text.length) {
+    const char = text[index];
+    const nextChar = text[index + 1];
+
+    if (char === '"') {
+      index = skipStringLiteral(text, index);
+      continue;
+    }
+
+    if (char === "#" || (char === "/" && nextChar === "/")) {
+      index = skipLineComment(text, index);
+      continue;
+    }
+
+    if (char === "/" && nextChar === "*") {
+      index = skipBlockComment(text, index);
+      continue;
+    }
+
+    headerPattern.lastIndex = index;
+    const match = headerPattern.exec(text);
+
+    if (match) {
+      const openingBraceIndex = index + match[0].lastIndexOf("{");
+      const block = extractBalancedBlock(text, openingBraceIndex);
+
+      if (block !== null) {
+        onMatch(match, block);
+        index = openingBraceIndex + block.length;
+        continue;
+      }
+    }
+
+    index += 1;
+  }
+}
+
+// Extracts each `<name> = { ... }` provider entry declared inside a
+// `terraform { required_providers { ... } }` block (the modern,
+// Terraform 0.13+ location for provider version constraints), keyed by
+// provider local name.
+function getRequiredProviderBlocks(terraformText: string): Map<string, string> {
+  const providerEntries = new Map<string, string>();
+
+  scanBalancedBlocks(terraformText, /terraform\s*\{/iy, (_terraformMatch, terraformBlock) => {
+    scanBalancedBlocks(terraformBlock, /required_providers\s*\{/iy, (_rpMatch, requiredProvidersBlock) => {
+      scanBalancedBlocks(
+        requiredProvidersBlock,
+        /([A-Za-z_][A-Za-z0-9_]*)\s*=\s*\{/y,
+        (entryMatch, entryBlock) => {
+          providerEntries.set(entryMatch[1], entryBlock);
+        },
+      );
+    });
+  });
+
+  return providerEntries;
+}
+
 function analyzeProviderVersionPinning(terraformText: string): Finding[] {
   const findings: Finding[] = [];
   const providerBlocks = terraformText.match(/provider\s+"[^"]+"\s*\{[\s\S]*?\}/gim) || [];
+  const requiredProviderBlocks = getRequiredProviderBlocks(terraformText);
+  const handledProviderNames = new Set<string>();
 
-  if (providerBlocks.length === 0) {
-    return findings;
-  }
-
-  for (const block of providerBlocks) {
-    const hasVersionConstraint = /version\s*=\s*["'][^"']+["']/i.test(block);
-    const hasBroadConstraint = /version\s*=\s*["']\s*(?:>=\s*0|>=\s*1|~>\s*0|~>\s*1|\*|\s*"\s*")/i.test(block);
+  const evaluateProvider = (searchText: string) => {
+    const hasVersionConstraint = /version\s*=\s*["'][^"']+["']/i.test(searchText);
+    const hasBroadConstraint = /version\s*=\s*["']\s*(?:>=\s*0|>=\s*1|~>\s*0|~>\s*1|\*|\s*"\s*")/i.test(searchText);
 
     if (!hasVersionConstraint || hasBroadConstraint) {
       findings.push({
@@ -742,7 +812,7 @@ function analyzeProviderVersionPinning(terraformText: string): Finding[] {
         severity: "WARNING",
         category: "Governance",
         description:
-          "The supplied Terraform contains a provider block without a clear version pin or with an unbounded version constraint. This can make infrastructure less reproducible across environments.",
+          "The supplied Terraform contains a provider without a clear version pin or with an unbounded version constraint. This can make infrastructure less reproducible across environments.",
         recommendation:
           "Pin provider versions to improve reproducibility and reduce unexpected upgrades.",
       });
@@ -755,6 +825,27 @@ function analyzeProviderVersionPinning(terraformText: string): Finding[] {
           "Terraform provider versions appear to be constrained or pinned.",
       });
     }
+  };
+
+  for (const block of providerBlocks) {
+    const nameMatch = block.match(/provider\s+"([^"]+)"/i);
+    const name = nameMatch ? nameMatch[1] : null;
+    const requiredProviderBlock = name ? requiredProviderBlocks.get(name) : undefined;
+    const searchText = requiredProviderBlock ? `${block}\n${requiredProviderBlock}` : block;
+
+    if (name) {
+      handledProviderNames.add(name);
+    }
+
+    evaluateProvider(searchText);
+  }
+
+  for (const [name, block] of requiredProviderBlocks) {
+    if (handledProviderNames.has(name)) {
+      continue;
+    }
+
+    evaluateProvider(block);
   }
 
   return findings;

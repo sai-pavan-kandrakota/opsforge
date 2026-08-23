@@ -159,7 +159,7 @@ function findPhraseMatches(text: string, phrase: string): number[] {
 }
 
 const NEGATION_CUES =
-  /\b(no|not|never|without|isn't|wasn't|doesn't|didn't|hasn't|haven't|hadn't|wouldn't|couldn't|shouldn't|won't|cannot|can't|n't)\b/i;
+  /\b(no|not|never|without|isn't|wasn't|aren't|weren't|don't|doesn't|didn't|hasn't|haven't|hadn't|wouldn't|couldn't|shouldn't|won't|cannot|can't|n't)\b/i;
 const NEGATION_WINDOW_WORDS = 6;
 const SENTENCE_BOUNDARY = /[.!?\n]/;
 

@@ -930,7 +930,7 @@ export default function AwsIamAnalyzerPage() {
                     </span>
                   </div>
 
-                  <p className="mt-3 text-sm leading-6 text-zinc-400">{finding.description}</p>
+                  <p className="mt-3 text-sm leading-6 text-zinc-400 break-words">{finding.description}</p>
 
                   {finding.recommendation ? (
                     <p className="mt-3 rounded-lg border border-zinc-700 bg-zinc-900/60 p-3 text-sm text-cyan-200">

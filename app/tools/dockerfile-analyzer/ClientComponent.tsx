@@ -590,7 +590,7 @@ export default function DockerfileAnalyzerPage() {
               placeholder="Paste your Dockerfile here..."
             />
 
-            <div className="mt-4 flex gap-3">
+            <div className="mt-4 flex flex-wrap gap-3">
               <button
                 onClick={runAnalysis}
                 className="rounded-lg bg-white px-5 py-2.5 text-sm font-medium text-zinc-950 transition hover:bg-zinc-200"
@@ -735,7 +735,7 @@ function FindingCard({ finding }: { finding: Finding }) {
         </span>
       </div>
 
-      <p className="mt-3 text-sm leading-6 text-zinc-400">{finding.description}</p>
+      <p className="mt-3 text-sm leading-6 text-zinc-400 break-words">{finding.description}</p>
 
       {finding.recommendation && (
         <div className="mt-4 border-t border-zinc-800 pt-4">

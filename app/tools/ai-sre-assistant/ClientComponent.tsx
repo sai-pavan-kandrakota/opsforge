@@ -803,7 +803,7 @@ export default function AiSreAssistantPage() {
 
           <p className="mb-5 text-sm leading-6 text-zinc-400">{analysis.summary}</p>
 
-          <div className="grid gap-4 lg:grid-cols-4">
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
             <div className="rounded-xl border border-zinc-800 bg-zinc-950/40 p-4">
               <div className="text-[10px] font-semibold uppercase tracking-[0.2em] text-zinc-500">Primary domain</div>
               <div className="mt-2">

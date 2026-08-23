@@ -406,6 +406,57 @@ function analyzeIamPolicy(terraformText: string): Finding[] {
   return findings;
 }
 
+// Scans `sgBlockText` for `ingress {` headers, treating `#`/`//` line
+// comments, `/* */` block comments, and `"..."` strings as opaque (mirrors
+// getResourceBlocks), and extracts each as a brace-balanced block via
+// extractBalancedBlock. This avoids the truncation a plain
+// `/ingress\s*\{[\s\S]*?\}/` regex suffers when a quoted string value (e.g. a
+// `description` field) contains a literal `}` — the regex has no notion of
+// "inside a string" and stops at the first `}` it sees, balanced or not.
+function getIngressBlocks(sgBlockText: string): string[] {
+  const headerPattern = /ingress\s*\{/iy;
+  const blocks: string[] = [];
+  let index = 0;
+
+  while (index < sgBlockText.length) {
+    const char = sgBlockText[index];
+    const nextChar = sgBlockText[index + 1];
+
+    if (char === '"') {
+      index = skipStringLiteral(sgBlockText, index);
+      continue;
+    }
+
+    if (char === "#" || (char === "/" && nextChar === "/")) {
+      index = skipLineComment(sgBlockText, index);
+      continue;
+    }
+
+    if (char === "/" && nextChar === "*") {
+      index = skipBlockComment(sgBlockText, index);
+      continue;
+    }
+
+    headerPattern.lastIndex = index;
+    const match = headerPattern.exec(sgBlockText);
+
+    if (match) {
+      const openingBraceIndex = index + match[0].lastIndexOf("{");
+      const ingressBlock = extractBalancedBlock(sgBlockText, openingBraceIndex);
+
+      if (ingressBlock !== null) {
+        blocks.push(ingressBlock);
+        index = openingBraceIndex + ingressBlock.length;
+        continue;
+      }
+    }
+
+    index += 1;
+  }
+
+  return blocks;
+}
+
 function analyzeSecurityGroups(terraformText: string): Finding[] {
   const findings: Finding[] = [];
   const sgBlocks = getResourceBlocks(terraformText, "aws_security_group");
@@ -418,7 +469,7 @@ function analyzeSecurityGroups(terraformText: string): Finding[] {
   const criticalPorts = new Set([22, 3389, 3306, 5432, 6379, 1433, 27017, 1521]);
 
   for (const block of sgBlocks) {
-    const ingressBlocks = block.match(/ingress\s*\{[\s\S]*?\}/gim) || [];
+    const ingressBlocks = getIngressBlocks(block);
 
     for (const ingressBlock of ingressBlocks) {
       const hasPublicCidr =

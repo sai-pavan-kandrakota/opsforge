@@ -143,19 +143,19 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-function findPhraseMatches(text: string, phrase: string): number[] {
+function findPhraseMatches(text: string, phrase: string): { start: number; end: number }[] {
   const pattern = new RegExp(`\\b${escapeRegExp(phrase)}\\b`, "gi");
-  const indices: number[] = [];
+  const occurrences: { start: number; end: number }[] = [];
   let match: RegExpExecArray | null;
 
   while ((match = pattern.exec(text)) !== null) {
-    indices.push(match.index);
+    occurrences.push({ start: match.index, end: match.index + match[0].length });
     if (match[0].length === 0) {
       pattern.lastIndex += 1;
     }
   }
 
-  return indices;
+  return occurrences;
 }
 
 const NEGATION_CUES =
@@ -184,21 +184,40 @@ function isNegated(text: string, matchIndex: number): boolean {
 
 type Signal = { phrase: string; label: string; weight: 1 | 2 | 3 };
 
-// Collects non-negated matches, deduped by evidence label (so a signal
+type SignalOccurrence = { phrase: string; label: string; weight: number; start: number; end: number };
+
+// Collects non-negated matches, then suppresses a weaker occurrence whose
+// entire span is contained inside a strictly stronger occurrence's span
+// (e.g. "role" inside "iam role"), so overlapping sub-phrases of one
+// stronger signal are no longer double-counted as independent evidence.
+// Separate occurrences, repeated occurrences, and equal-weight overlaps
+// are never suppressed. Finally deduped by evidence label (so a signal
 // list with several surface forms mapped to the same label — e.g.
 // "throttled"/"throttling"/"throttle" — never inflates the score or the
 // evidence list beyond one entry).
 function collectSignalMatches(text: string, signals: Signal[]): { label: string; weight: number }[] {
+  const occurrences: SignalOccurrence[] = signals.flatMap((signal) =>
+    findPhraseMatches(text, signal.phrase)
+      .filter(({ start }) => !isNegated(text, start))
+      .map(({ start, end }) => ({ phrase: signal.phrase, label: signal.label, weight: signal.weight, start, end }))
+  );
+
+  const surviving = occurrences.filter(
+    (occ) =>
+      !occurrences.some(
+        (other) =>
+          other.weight > occ.weight &&
+          other.start <= occ.start &&
+          other.end >= occ.end &&
+          !(other.start === occ.start && other.end === occ.end)
+      )
+  );
+
   const bestByLabel = new Map<string, number>();
-
-  for (const signal of signals) {
-    const matches = findPhraseMatches(text, signal.phrase);
-    const hasRealMatch = matches.some((index) => !isNegated(text, index));
-    if (!hasRealMatch) continue;
-
-    const current = bestByLabel.get(signal.label) ?? 0;
-    if (signal.weight > current) {
-      bestByLabel.set(signal.label, signal.weight);
+  for (const occ of surviving) {
+    const current = bestByLabel.get(occ.label) ?? 0;
+    if (occ.weight > current) {
+      bestByLabel.set(occ.label, occ.weight);
     }
   }
 
@@ -226,8 +245,8 @@ const DOMAIN_SIGNALS: Record<IncidentDomain, Signal[]> = {
     { phrase: "cordoned", label: "Node cordoned", weight: 2 },
     { phrase: "evicted", label: "Pod evicted", weight: 2 },
     { phrase: "disk pressure", label: "Disk pressure", weight: 2 },
-    { phrase: "namespace", label: "Namespace reference", weight: 2 },
-    { phrase: "namespaces", label: "Namespace reference", weight: 2 },
+    { phrase: "namespace", label: "Namespace reference", weight: 1 },
+    { phrase: "namespaces", label: "Namespace reference", weight: 1 },
     { phrase: "pod", label: "Pod reference", weight: 2 },
     { phrase: "pods", label: "Pod reference", weight: 2 },
     { phrase: "container", label: "Container reference", weight: 1 },
@@ -269,8 +288,8 @@ const DOMAIN_SIGNALS: Record<IncidentDomain, Signal[]> = {
     { phrase: "rollout failure", label: "Rollout failure", weight: 2 },
     { phrase: "image push", label: "Image push", weight: 2 },
     { phrase: "docker build", label: "Docker build", weight: 2 },
-    { phrase: "artifact", label: "Artifact reference", weight: 2 },
-    { phrase: "artifacts", label: "Artifact reference", weight: 2 },
+    { phrase: "artifact", label: "Artifact reference", weight: 1 },
+    { phrase: "artifacts", label: "Artifact reference", weight: 1 },
     { phrase: "unable to authenticate", label: "Authentication failure", weight: 2 },
     { phrase: "login failed", label: "Login failed", weight: 2 },
     { phrase: "pipeline", label: "Pipeline reference", weight: 1 },
@@ -290,7 +309,7 @@ const DOMAIN_SIGNALS: Record<IncidentDomain, Signal[]> = {
     { phrase: "sqlstate", label: "SQLSTATE error", weight: 3 },
     { phrase: "connection pool exhausted", label: "Connection pool exhausted", weight: 3 },
     { phrase: "too many connections", label: "Too many connections", weight: 3 },
-    { phrase: "database", label: "Database reference", weight: 2 },
+    { phrase: "database", label: "Database reference", weight: 1 },
     { phrase: "db connection", label: "DB connection", weight: 2 },
     { phrase: "slow query", label: "Slow query", weight: 2 },
     { phrase: "lock timeout", label: "Lock timeout", weight: 2 },
@@ -309,7 +328,7 @@ const DOMAIN_SIGNALS: Record<IncidentDomain, Signal[]> = {
     { phrase: "gateway timeout", label: "Gateway timeout", weight: 3 },
     { phrase: "dns", label: "DNS reference", weight: 2 },
     { phrase: "tls", label: "TLS reference", weight: 2 },
-    { phrase: "certificate", label: "Certificate reference", weight: 2 },
+    { phrase: "certificate", label: "Certificate reference", weight: 1 },
     { phrase: "upstream", label: "Upstream reference", weight: 2 },
     { phrase: "ingress", label: "Ingress reference", weight: 2 },
     { phrase: "load balancer", label: "Load balancer", weight: 2 },
@@ -323,11 +342,11 @@ const DOMAIN_SIGNALS: Record<IncidentDomain, Signal[]> = {
     { phrase: "unhandled exception", label: "Unhandled exception", weight: 3 },
     { phrase: "segmentation fault", label: "Segmentation fault", weight: 3 },
     { phrase: "null pointer", label: "Null pointer", weight: 3 },
-    { phrase: "exception", label: "Exception", weight: 2 },
-    { phrase: "exceptions", label: "Exception", weight: 2 },
+    { phrase: "exception", label: "Exception", weight: 1 },
+    { phrase: "exceptions", label: "Exception", weight: 1 },
     { phrase: "traceback", label: "Traceback", weight: 2 },
     { phrase: "http 500", label: "HTTP 500", weight: 2 },
-    { phrase: "panic", label: "Panic", weight: 2 },
+    { phrase: "panic", label: "Panic", weight: 1 },
     { phrase: "config error", label: "Config error", weight: 2 },
     { phrase: "error", label: "Error reference", weight: 1 },
     { phrase: "errors", label: "Error reference", weight: 1 },

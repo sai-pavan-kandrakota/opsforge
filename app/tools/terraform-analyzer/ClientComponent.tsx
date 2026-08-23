@@ -159,6 +159,50 @@ function skipBlockComment(text: string, index: number): number {
   return closeIndex === -1 ? text.length : closeIndex + 2;
 }
 
+// Returns `text` with every `#`/`//` line comment and `/* */` block comment
+// blanked out (replaced with spaces), while leaving string-literal contents
+// and every non-comment character untouched. Newlines inside a blanked
+// comment span are preserved exactly, so line numbers and line-by-line
+// splitting stay aligned with the original text. Used to make regex-based
+// secret scans immune to a secret-shaped value that only appears inside a
+// comment, mirroring the comment-safety already applied to block extraction
+// via skipLineComment/skipBlockComment/skipStringLiteral.
+function stripComments(text: string): string {
+  let result = "";
+  let index = 0;
+
+  while (index < text.length) {
+    const char = text[index];
+    const nextChar = text[index + 1];
+
+    if (char === '"') {
+      const end = skipStringLiteral(text, index);
+      result += text.slice(index, end);
+      index = end;
+      continue;
+    }
+
+    if (char === "#" || (char === "/" && nextChar === "/")) {
+      const end = skipLineComment(text, index);
+      result += text.slice(index, end).replace(/[^\n]/g, " ");
+      index = end;
+      continue;
+    }
+
+    if (char === "/" && nextChar === "*") {
+      const end = skipBlockComment(text, index);
+      result += text.slice(index, end).replace(/[^\n]/g, " ");
+      index = end;
+      continue;
+    }
+
+    result += char;
+    index += 1;
+  }
+
+  return result;
+}
+
 // Scans the full text for `resource "<resourceType>" "<name>" {` headers,
 // treating `#`/`//` line comments, `/* */` block comments, and `"..."`
 // strings as opaque along the way. This means a resource declaration that
@@ -253,6 +297,79 @@ function extractBalancedBlock(text: string, openingBraceIndex: number): string |
   }
 
   return null;
+}
+
+// Finds the innermost `{ ... }` block that encloses `targetIndex`, treating
+// comments and strings as opaque along the way (same technique as
+// extractBalancedBlock, but scanning forward from the start while tracking a
+// stack of currently-open brace positions instead of a single depth
+// counter). Returns null if `targetIndex` is not inside any block. Used to
+// resolve a whole-document regex match (which carries no notion of "which
+// resource/rule this is part of") back to its actual enclosing block, so a
+// caller can inspect that block's own attributes instead of the rest of the
+// document.
+function findEnclosingBlockAt(
+  text: string,
+  targetIndex: number,
+): { block: string; openIndex: number } | null {
+  const openIndexes: number[] = [];
+  let index = 0;
+
+  while (index < text.length && index < targetIndex) {
+    const char = text[index];
+    const nextChar = text[index + 1];
+
+    if (char === '"') {
+      index = skipStringLiteral(text, index);
+      continue;
+    }
+
+    if (char === "#" || (char === "/" && nextChar === "/")) {
+      index = skipLineComment(text, index);
+      continue;
+    }
+
+    if (char === "/" && nextChar === "*") {
+      index = skipBlockComment(text, index);
+      continue;
+    }
+
+    if (char === "{") {
+      openIndexes.push(index);
+    } else if (char === "}") {
+      openIndexes.pop();
+    }
+
+    index += 1;
+  }
+
+  if (openIndexes.length === 0) {
+    return null;
+  }
+
+  const openIndex = openIndexes[openIndexes.length - 1];
+  const block = extractBalancedBlock(text, openIndex);
+
+  if (block === null) {
+    return null;
+  }
+
+  return { block, openIndex };
+}
+
+// True when the block found by findEnclosingBlockAt is an egress rule — a
+// bare `egress { ... }` block (checked via the header text immediately
+// before the opening brace, since the block body itself doesn't include its
+// own header) or an `aws_security_group_rule`-style resource with an
+// explicit `type = "egress"` attribute. Outbound-open rules are a routine,
+// expected pattern (the bundled example configuration itself uses
+// `egress { protocol = "-1" ... }`) and are never scanned as ingress by
+// analyzeSecurityGroups either — this keeps the top-level check consistent
+// with that same ingress-only scope instead of treating a wide-open egress
+// rule as equivalent to a wide-open inbound rule.
+function isEgressContext(terraformText: string, openIndex: number, block: string): boolean {
+  const headerWindow = terraformText.slice(Math.max(0, openIndex - 40), openIndex);
+  return /egress\s*$/i.test(headerWindow) || /type\s*=\s*["']egress["']/i.test(block);
 }
 
 function isTerraformReferenceLike(value: string): boolean {
@@ -439,6 +556,40 @@ function getIngressBlocks(sgBlockText: string): string[] {
   return blocks;
 }
 
+const CRITICAL_PORTS = new Set([22, 3389, 3306, 5432, 6379, 1433, 27017, 1521]);
+
+// Determines whether a block exposing public ingress (an `ingress { ... }`
+// body, or any other block with its own from_port/to_port/protocol
+// attributes, such as an `aws_security_group_rule` resource) covers a
+// well-known administrative or database port. Explicitly recognizes the
+// canonical AWS "allow all traffic" idiom — `protocol = "-1"` with
+// `from_port = 0` and `to_port = 0` (AWS ignores the port fields when the
+// protocol is "-1", but Terraform still requires them to be set, by
+// convention to 0) — which covers every critical port at once and must
+// never score lower than a single named critical port. This is an explicit,
+// protocol-aware special case, not a generic port-range relaxation: normal
+// single ports and ranges are evaluated exactly as before.
+function hasCriticalPortExposure(blockText: string): boolean {
+  const fromMatch = blockText.match(/from_port\s*=\s*(\d+)/i);
+  const toMatch = blockText.match(/to_port\s*=\s*(\d+)/i);
+  const fromPort = fromMatch ? Number(fromMatch[1]) : null;
+  const toPort = toMatch ? Number(toMatch[1]) : null;
+
+  if (fromPort === null || toPort === null) {
+    return false;
+  }
+
+  const isAllProtocols = /protocol\s*=\s*["']-1["']/i.test(blockText);
+  if (isAllProtocols && fromPort === 0 && toPort === 0) {
+    return true;
+  }
+
+  return (
+    CRITICAL_PORTS.has(fromPort) || CRITICAL_PORTS.has(toPort) ||
+    (fromPort < 65535 && toPort > 0 && (fromPort <= 22 && toPort >= 22 || fromPort <= 3389 && toPort >= 3389 || fromPort <= 3306 && toPort >= 3306 || fromPort <= 5432 && toPort >= 5432 || fromPort <= 6379 && toPort >= 6379 || fromPort <= 1433 && toPort >= 1433 || fromPort <= 27017 && toPort >= 27017 || fromPort <= 1521 && toPort >= 1521))
+  );
+}
+
 function analyzeSecurityGroups(terraformText: string): Finding[] {
   const findings: Finding[] = [];
   const sgBlocks = getResourceBlocks(terraformText, "aws_security_group");
@@ -448,7 +599,6 @@ function analyzeSecurityGroups(terraformText: string): Finding[] {
   }
 
   const publicExposureIssues: { text: string; isCritical: boolean }[] = [];
-  const criticalPorts = new Set([22, 3389, 3306, 5432, 6379, 1433, 27017, 1521]);
 
   for (const block of sgBlocks) {
     const ingressBlocks = getIngressBlocks(block);
@@ -475,14 +625,9 @@ function analyzeSecurityGroups(terraformText: string): Finding[] {
           ? `${fromPort}`
           : "unknown range";
 
-      const hasCriticalPort =
-        fromPort !== null && toPort !== null &&
-        (criticalPorts.has(fromPort) || criticalPorts.has(toPort) ||
-          (fromPort < 65535 && toPort > 0 && (fromPort <= 22 && toPort >= 22 || fromPort <= 3389 && toPort >= 3389 || fromPort <= 3306 && toPort >= 3306 || fromPort <= 5432 && toPort >= 5432 || fromPort <= 6379 && toPort >= 6379 || fromPort <= 1433 && toPort >= 1433 || fromPort <= 27017 && toPort >= 27017 || fromPort <= 1521 && toPort >= 1521)));
-
       publicExposureIssues.push({
         text: `Public ingress on ${rangeLabel} is open to 0.0.0.0/0 or ::/0.`,
-        isCritical: hasCriticalPort,
+        isCritical: hasCriticalPortExposure(ingressBlock),
       });
     }
   }
@@ -930,7 +1075,12 @@ function getRequiredProviderBlocks(terraformText: string): Map<string, string> {
 
 function analyzeProviderVersionPinning(terraformText: string): Finding[] {
   const findings: Finding[] = [];
-  const providerBlocks = terraformText.match(/provider\s+"[^"]+"\s*\{[\s\S]*?\}/gim) || [];
+  const providerEntries: { name: string; block: string }[] = [];
+
+  scanBalancedBlocks(terraformText, /provider\s+"([^"]+)"\s*\{/iy, (headerMatch, block) => {
+    providerEntries.push({ name: headerMatch[1], block });
+  });
+
   const requiredProviderBlocks = getRequiredProviderBlocks(terraformText);
   const handledProviderNames = new Set<string>();
 
@@ -959,15 +1109,11 @@ function analyzeProviderVersionPinning(terraformText: string): Finding[] {
     }
   };
 
-  for (const block of providerBlocks) {
-    const nameMatch = block.match(/provider\s+"([^"]+)"/i);
-    const name = nameMatch ? nameMatch[1] : null;
-    const requiredProviderBlock = name ? requiredProviderBlocks.get(name) : undefined;
+  for (const { name, block } of providerEntries) {
+    const requiredProviderBlock = requiredProviderBlocks.get(name);
     const searchText = requiredProviderBlock ? `${block}\n${requiredProviderBlock}` : block;
 
-    if (name) {
-      handledProviderNames.add(name);
-    }
+    handledProviderNames.add(name);
 
     evaluateProvider(searchText);
   }
@@ -1027,7 +1173,11 @@ function findAttributeMatch(text: string, attributePattern: RegExp): RegExpExecA
 
 function analyzeModuleVersionPinning(terraformText: string): Finding[] {
   const findings: Finding[] = [];
-  const moduleBlocks = terraformText.match(/module\s+"[^"]+"\s*\{[\s\S]*?\}/gim) || [];
+  const moduleBlocks: string[] = [];
+
+  scanBalancedBlocks(terraformText, /module\s+"[^"]+"\s*\{/iy, (_match, block) => {
+    moduleBlocks.push(block);
+  });
 
   for (const block of moduleBlocks) {
     const sourceMatch = block.match(/source\s*=\s*["']([^"']+)["']/i);
@@ -1468,7 +1618,7 @@ function analyzeSensitiveVariables(terraformText: string): Finding[] {
     }
   }
 
-  const literalSecretLines = terraformText
+  const literalSecretLines = stripComments(terraformText)
     .split(/\r?\n/)
     .filter((line) => /(?:password|secret|token|access_key|secret_key|api_key|private_key|client_secret|db_password)/i.test(line));
 
@@ -1648,8 +1798,9 @@ function analyzeTerraform(terraformText: string): Finding[] {
   const hardcodedSecretMatches: string[] = [];
   const secretPattern =
     /(^|\s)([A-Za-z0-9_]*(?:password|secret|token|access_key|secret_key|api_key|private_key|client_secret|db_password)[A-Za-z0-9_]*)\s*=\s*["']([^"']+)["']/gim;
+  const secretScanText = stripComments(terraformText);
 
-  for (const match of terraformText.matchAll(secretPattern)) {
+  for (const match of secretScanText.matchAll(secretPattern)) {
     const key = match[2]?.trim() ?? "";
     const rawValue = match[3]?.trim() ?? "";
     const isNormalReference =
@@ -1715,13 +1866,28 @@ function analyzeTerraform(terraformText: string): Finding[] {
 
   const publicExposurePattern =
     /(?:cidr_blocks\s*=\s*\[[^\]]*"0\.0\.0\.0\/0"[^\]]*\]|ipv6_cidr_blocks\s*=\s*\[[^\]]*"::\/0"[^\]]*\]|(?:from_port|to_port).*0\.0\.0\.0\/0)/gim;
-  const publicExposureMatches = terraformText.match(publicExposurePattern) || [];
-  const sshOrRdpOpen = /(?:22|3389)/i.test(terraformText);
+  const publicExposureMatches = Array.from(terraformText.matchAll(publicExposurePattern));
+  // Severity is derived from each match's own enclosing block (e.g. the
+  // aws_security_group_rule or ingress block it actually appeared in), via
+  // the same hasCriticalPortExposure check analyzeSecurityGroups uses —
+  // never from a whole-document "does '22' or '3389' appear anywhere"
+  // substring test, which could be true or false for reasons unrelated to
+  // the actual exposed port (e.g. an unrelated CIDR octet like 172.22.0.0/16).
+  const hasCriticalExposure = publicExposureMatches.some((match) => {
+    const enclosing = findEnclosingBlockAt(terraformText, match.index ?? 0);
+    if (!enclosing) {
+      return hasCriticalPortExposure(match[0]);
+    }
+    if (isEgressContext(terraformText, enclosing.openIndex, enclosing.block)) {
+      return false;
+    }
+    return hasCriticalPortExposure(enclosing.block);
+  });
 
   if (publicExposureMatches.length > 0) {
     findings.push({
       title: "Public network exposure detected",
-      severity: sshOrRdpOpen ? "CRITICAL" : "WARNING",
+      severity: hasCriticalExposure ? "CRITICAL" : "WARNING",
       category: "Networking",
       description:
         "The Terraform configuration exposes services to the public internet or broad CIDR ranges.",

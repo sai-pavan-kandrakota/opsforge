@@ -120,6 +120,59 @@ function parseWorkflowYaml(yamlText: string): WorkflowDocument | null {
   }
 }
 
+// Returns `rawYaml` with `#` line comments removed, treating single- and
+// double-quoted string content as opaque so a `#` inside a quoted value
+// (e.g. a URL fragment) is never mistaken for a comment start. Scoped only
+// for use by the hardcoded-secret detection below - this does not affect
+// how the rest of analyzeGitHubActionsWorkflow parses or reads the workflow.
+function stripYamlComments(rawYaml: string): string {
+  let result = "";
+  let index = 0;
+
+  while (index < rawYaml.length) {
+    const char = rawYaml[index];
+
+    if (char === '"' || char === "'") {
+      const quote = char;
+      let end = index + 1;
+
+      while (end < rawYaml.length) {
+        if (quote === '"' && rawYaml[end] === "\\") {
+          end += 2;
+          continue;
+        }
+        if (rawYaml[end] === quote) {
+          if (quote === "'" && rawYaml[end + 1] === "'") {
+            end += 2;
+            continue;
+          }
+          end += 1;
+          break;
+        }
+        end += 1;
+      }
+
+      result += rawYaml.slice(index, end);
+      index = end;
+      continue;
+    }
+
+    if (char === "#") {
+      const newlineIndex = rawYaml.indexOf("\n", index);
+      if (newlineIndex === -1) {
+        break;
+      }
+      index = newlineIndex;
+      continue;
+    }
+
+    result += char;
+    index += 1;
+  }
+
+  return result;
+}
+
 function analyzeGitHubActionsWorkflow(rawYaml: string): Finding[] {
   rawYaml = rawYaml || "";
 
@@ -347,11 +400,14 @@ function analyzeGitHubActionsWorkflow(rawYaml: string): Finding[] {
   }
 
   const hardcodedSecretPattern =
-    /(?:password\s*[:=]\s*["'][^"']+["']|token\s*[:=]\s*["'][^"']+["']|secret\s*[:=]\s*["'][^"']+["']|\$\{\{\s*secrets\.[A-Z0-9_]+\s*\}\}|AWS_SECRET_ACCESS_KEY|GITHUB_TOKEN|ghp_[A-Za-z0-9]+)/gi;
-  const hardcodedSecretHits = (rawYaml.match(hardcodedSecretPattern) || []).filter(
-    (hit) => !/^\$\{\{\s*secrets\.[A-Z0-9_]+\s*\}\}$/i.test(hit)
+    /(?:password\s*[:=]\s*["'][^"']+["']|token\s*[:=]\s*["'][^"']+["']|secret\s*[:=]\s*["'][^"']+["']|\$\{\{\s*secrets\.[A-Z0-9_]+\s*\}\}|(?:AWS_SECRET_ACCESS_KEY|GITHUB_TOKEN)\b\s*[:=][^\n]*|ghp_[A-Za-z0-9]+)/gi;
+  const secretDetectionText = stripYamlComments(rawYaml);
+  const hardcodedSecretHits = (secretDetectionText.match(hardcodedSecretPattern) || []).filter(
+    (hit) =>
+      !/^\$\{\{\s*secrets\.[A-Z0-9_]+\s*\}\}$/i.test(hit) &&
+      !(/^(?:AWS_SECRET_ACCESS_KEY|GITHUB_TOKEN)\b/i.test(hit) && /secrets\.[A-Z0-9_]+/i.test(hit))
   );
-  const suspiciousSecretInRun = /echo\s+["'].*(?:password|secret|token|key)=/i.test(rawYaml);
+  const suspiciousSecretInRun = /echo\s+["'].*(?:password|secret|token|key)=/i.test(secretDetectionText);
 
   if (hardcodedSecretHits.length > 0) {
     findings.push({

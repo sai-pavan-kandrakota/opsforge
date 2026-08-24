@@ -85,6 +85,22 @@ function isLikelyLiteralSecret(value: string): boolean {
   return trimmed.length >= 8 && /[A-Za-z0-9_\-+/=]{8,}/.test(trimmed);
 }
 
+// Returns `dockerfileText` with every full-line comment (a line whose first
+// non-whitespace character is `#`) replaced by an empty line, while leaving
+// every other line — including real instructions, and any `#` that appears
+// after content on a non-comment line, which Docker itself does not treat
+// as a comment — completely untouched. Line count and newline-separated
+// structure are preserved, so this single representation can be consumed
+// either as a whole string (for substring/pattern checks) or re-split into
+// lines (for line-by-line checks) without any consumer needing its own
+// comment-handling logic.
+function stripDockerfileComments(dockerfileText: string): string {
+  return dockerfileText
+    .split(/\r?\n/)
+    .map((line) => (/^\s*#/.test(line) ? "" : line))
+    .join("\n");
+}
+
 function detectMalformedDockerfile(dockerfile: string): boolean {
   const trimmed = dockerfile.trim();
   if (!trimmed) return true;
@@ -117,6 +133,8 @@ export function analyzeDockerfile(dockerfile: string): Finding[] {
   const text = dockerfile || "";
   const normalized = text.trim();
   const lines = text.split(/\r?\n/);
+  const commentSafeText = stripDockerfileComments(text);
+  const commentSafeLines = commentSafeText.split(/\r?\n/);
 
   if (!normalized) {
     findings.push(
@@ -131,7 +149,7 @@ export function analyzeDockerfile(dockerfile: string): Finding[] {
     return findings;
   }
 
-  if (detectMalformedDockerfile(text)) {
+  if (detectMalformedDockerfile(commentSafeText)) {
     findings.push(
       makeFinding(
         "Dockerfile appears malformed",
@@ -234,7 +252,7 @@ export function analyzeDockerfile(dockerfile: string): Finding[] {
     );
   }
 
-  if (/--privileged|--cap-add\s*=\s*(?:ALL|SYS_ADMIN|NET_ADMIN|SYS_PTRACE|DAC_READ_SEARCH|SYS_MODULE)|--security-opt\s*=\s*seccomp:unconfined/i.test(text)) {
+  if (/--privileged|--cap-add\s*=\s*(?:ALL|SYS_ADMIN|NET_ADMIN|SYS_PTRACE|DAC_READ_SEARCH|SYS_MODULE)|--security-opt\s*=\s*seccomp:unconfined/i.test(commentSafeText)) {
     findings.push(
       makeFinding(
         "Privileged container configuration detected",
@@ -246,7 +264,7 @@ export function analyzeDockerfile(dockerfile: string): Finding[] {
     );
   }
 
-  if (/\/var\/run\/docker\.sock|docker\.sock|\/var\/run\/podman\.sock/i.test(text)) {
+  if (/\/var\/run\/docker\.sock|docker\.sock|\/var\/run\/podman\.sock/i.test(commentSafeText)) {
     findings.push(
       makeFinding(
         "Docker socket exposure",
@@ -258,7 +276,7 @@ export function analyzeDockerfile(dockerfile: string): Finding[] {
     );
   }
 
-  if (/openssh-server|sshd|service\s+ssh|ssh\s+start|apt-get\s+install\s+.*ssh|apk\s+add\s+.*openssh/i.test(text)) {
+  if (/openssh-server|sshd|service\s+ssh|ssh\s+start|apt-get\s+install\s+.*ssh|apk\s+add\s+.*openssh/i.test(commentSafeText)) {
     findings.push(
       makeFinding(
         "SSH server is installed or started",
@@ -270,7 +288,7 @@ export function analyzeDockerfile(dockerfile: string): Finding[] {
     );
   }
 
-  if (/\bsudo\b/i.test(text)) {
+  if (/\bsudo\b/i.test(commentSafeText)) {
     findings.push(
       makeFinding(
         "Sudo usage detected",
@@ -283,7 +301,7 @@ export function analyzeDockerfile(dockerfile: string): Finding[] {
   }
 
   const secretLines: string[] = [];
-  for (const line of lines) {
+  for (const line of commentSafeLines) {
     const envMatch = /^\s*(?:ARG|ENV)\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/.exec(line);
     if (envMatch) {
       const [, key, value] = envMatch;

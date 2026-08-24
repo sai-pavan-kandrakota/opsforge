@@ -101,6 +101,69 @@ function stripDockerfileComments(dockerfileText: string): string {
     .join("\n");
 }
 
+type DockerStage = {
+  ref: string;
+  alias: string | null;
+  stageText: string;
+};
+
+// Splits `text` into per-stage slices using the already-matched `fromMatches`
+// (each stage runs from its own FROM up to, but not including, the next
+// FROM, or end of file for the last stage), pairing each with its base
+// image/stage reference and its optional AS alias.
+function buildDockerStages(text: string, fromMatches: RegExpMatchArray[]): DockerStage[] {
+  return fromMatches.map((match, index) => {
+    const start = match.index ?? 0;
+    const end = index + 1 < fromMatches.length ? fromMatches[index + 1].index ?? text.length : text.length;
+
+    return {
+      ref: match[1] || "",
+      alias: match[2] || null,
+      stageText: text.slice(start, end),
+    };
+  });
+}
+
+function getStageOwnUser(stageText: string): string | null {
+  const matches = [...stageText.matchAll(/^\s*USER\s+([^\s]+).*$/gim)].map((match) => match[1].trim());
+  return matches.length > 0 ? matches[matches.length - 1] : null;
+}
+
+// Resolves the effective runtime USER for stages[stageIndex]: its own last
+// USER instruction if it has one, otherwise the USER inherited from an
+// earlier stage — but only when this stage's base reference exactly matches
+// (case-insensitively, never a substring) an earlier stage's AS alias,
+// mirroring real Docker stage-inheritance semantics. Any other reference
+// (an external image, or one that cannot be resolved to a strictly earlier
+// stage) is treated as having no inherited user, matching prior behavior.
+// `visited` plus the strictly-earlier-index requirement together guarantee
+// this recursion terminates even on a malformed or cyclic reference, since
+// the candidate stage index can only move backward and each index is
+// visited at most once.
+function resolveStageUser(
+  stages: DockerStage[],
+  aliasToStageIndex: Map<string, number>,
+  stageIndex: number,
+  visited: Set<number>
+): string | null {
+  if (visited.has(stageIndex)) {
+    return null;
+  }
+  visited.add(stageIndex);
+
+  const ownUser = getStageOwnUser(stages[stageIndex].stageText);
+  if (ownUser !== null) {
+    return ownUser;
+  }
+
+  const baseStageIndex = aliasToStageIndex.get(stages[stageIndex].ref.toLowerCase());
+  if (baseStageIndex === undefined || baseStageIndex >= stageIndex) {
+    return null;
+  }
+
+  return resolveStageUser(stages, aliasToStageIndex, baseStageIndex, visited);
+}
+
 function detectMalformedDockerfile(dockerfile: string): boolean {
   const trimmed = dockerfile.trim();
   if (!trimmed) return true;
@@ -161,12 +224,19 @@ export function analyzeDockerfile(dockerfile: string): Finding[] {
     );
   }
 
-  const fromMatches = [...text.matchAll(/^\s*FROM\s+(?:--platform=\S+\s+)?([^\s]+)(?:\s+AS\s+\S+)?/gim)];
+  const fromMatches = [...text.matchAll(/^\s*FROM\s+(?:--platform=\S+\s+)?([^\s]+)(?:\s+AS\s+(\S+))?/gim)];
   const hasFrom = fromMatches.length > 0;
-  const finalStageText = fromMatches.length > 0
-    ? text.slice(fromMatches[fromMatches.length - 1].index ?? 0)
-    : text;
-  const hasUser = /^\s*USER\s+/im.test(finalStageText);
+  const dockerStages = buildDockerStages(text, fromMatches);
+  const stageAliasToIndex = new Map<string, number>();
+  dockerStages.forEach((stage, index) => {
+    if (stage.alias) {
+      stageAliasToIndex.set(stage.alias.toLowerCase(), index);
+    }
+  });
+  const resolvedFinalUser = hasFrom
+    ? resolveStageUser(dockerStages, stageAliasToIndex, dockerStages.length - 1, new Set<number>())
+    : null;
+  const hasUser = resolvedFinalUser !== null;
   const hasHealthcheck = /^\s*HEALTHCHECK\s+/im.test(text);
   const hasCopy = /^\s*COPY\s+/im.test(text);
   const hasAdd = /^\s*ADD\s+/im.test(text);
@@ -217,8 +287,7 @@ export function analyzeDockerfile(dockerfile: string): Finding[] {
     }
   }
 
-  const userInstructions = [...finalStageText.matchAll(/^\s*USER\s+([^\s]+).*$/gim)].map((match) => match[1].trim());
-  const lastUser = userInstructions[userInstructions.length - 1] || "";
+  const lastUser = resolvedFinalUser || "";
 
   if (!hasUser) {
     findings.push(

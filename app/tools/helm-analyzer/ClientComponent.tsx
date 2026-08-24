@@ -58,6 +58,7 @@ values:
     - name: API_URL
       value: "https://api.example.com"
 
+---
 {{- if .Values.ingress.enabled }}
 apiVersion: networking.k8s.io/v1
 kind: Ingress
@@ -150,11 +151,115 @@ function hasHelmTemplateSyntax(value: string): boolean {
   return /\{\{[-#]?\s*[\s\S]*?[-#]?\s*\}\}/.test(value);
 }
 
+// True when `text` has any non-whitespace content left after removing Helm
+// tags - i.e. it is not merely blank/template-control-only. Used to decide
+// whether an if/range/with branch actually rendered something real.
+function hasMeaningfulContent(text: string): boolean {
+  return text.replace(/\{\{[\s\S]*?\}\}/g, "").trim().length > 0;
+}
+
+// Removes Helm control-flow tags (`{{ if/range/with }}`, `{{ else }}`,
+// `{{ end }}`) while preserving the YAML content they wrap, treating the
+// condition as true and a range as iterating once - the same "assume it
+// renders" static-analysis approach already used for plain `{{ .Values.x }}`
+// substitutions below. Each open block buffers its "if" and "else" phase
+// content separately (nested blocks resolve into whichever phase-buffer of
+// their parent is currently active, so nesting composes correctly and a
+// block's own `end` only ever closes its own frame). A frame only ever has
+// ONE candidate alternative branch: `{{ else if ... }}` matches the same
+// tag detection as a plain `{{ else }}`, so the first one seen on a frame
+// starts its elseBuffer, and any further else/else-if on that same frame
+// (a 3+-way chain) moves it to an "ignore" phase whose content - including
+// any nested block's own resolved output - is discarded rather than
+// appended to elseBuffer. Without this, a chain's later branches would
+// accumulate into the same buffer and risk being chosen together as one
+// concatenated (and likely duplicate-key/invalid) blob. At a block's `end`,
+// the if-branch is kept UNLESS it has no meaningful content of its own
+// while the else-branch does - in which case the else-branch is kept
+// instead - so a resource that happens to live in an "else" whose "if" is
+// blank/template-only is not silently lost. Only one side is ever kept,
+// never both, since concatenating branches into one YAML document could
+// produce duplicate keys or invalid structure. Any block/else/end tag
+// without a matching opener (malformed input) is silently dropped rather
+// than left as literal text, matching the previous permissive behavior for
+// malformed input.
+function stripHelmControlFlow(value: string): string {
+  type Frame = { ifBuffer: string; elseBuffer: string; phase: "if" | "else" | "ignore" };
+
+  const tagPattern = /\{\{[\s\S]*?\}\}/g;
+  let rootResult = "";
+  let cursor = 0;
+  const blockStack: Frame[] = [];
+
+  const appendToCurrent = (text: string) => {
+    if (blockStack.length === 0) {
+      rootResult += text;
+      return;
+    }
+    const top = blockStack[blockStack.length - 1];
+    if (top.phase === "if") {
+      top.ifBuffer += text;
+    } else if (top.phase === "else") {
+      top.elseBuffer += text;
+    }
+    // phase === "ignore": a second (or later) else/else-if branch on this
+    // frame - discarded entirely, never appended to either buffer, so
+    // elseBuffer can only ever hold ONE alternative branch, never several
+    // concatenated together.
+  };
+
+  let match: RegExpExecArray | null;
+  while ((match = tagPattern.exec(value)) !== null) {
+    appendToCurrent(value.slice(cursor, match.index));
+    cursor = tagPattern.lastIndex;
+
+    const tagBody = match[0]
+      .slice(2, -2)
+      .replace(/^[-#]/, "")
+      .replace(/[-#]$/, "")
+      .trim();
+
+    if (/^(?:if|range|with)\b/.test(tagBody)) {
+      blockStack.push({ ifBuffer: "", elseBuffer: "", phase: "if" });
+      continue;
+    }
+
+    if (/^else\b/.test(tagBody)) {
+      if (blockStack.length > 0) {
+        const top = blockStack[blockStack.length - 1];
+        // `else if` matches this same branch (`/^else\b/`), so a chain like
+        // `if / else if B / else` sees "else" twice on the same frame - the
+        // first transitions if->else (this frame's one candidate
+        // alternative branch); any further else/else-if on the same frame
+        // moves it to "ignore" rather than re-entering "else", so a 3+-way
+        // chain can never accumulate more than one alternative branch.
+        top.phase = top.phase === "if" ? "else" : "ignore";
+      }
+      continue;
+    }
+
+    if (/^end\b/.test(tagBody)) {
+      if (blockStack.length > 0) {
+        const frame = blockStack.pop() as Frame;
+        const chosen =
+          !hasMeaningfulContent(frame.ifBuffer) && hasMeaningfulContent(frame.elseBuffer)
+            ? frame.elseBuffer
+            : frame.ifBuffer;
+        appendToCurrent(chosen);
+      }
+      continue;
+    }
+
+    appendToCurrent(match[0]);
+  }
+
+  appendToCurrent(value.slice(cursor));
+
+  return rootResult;
+}
+
 function sanitizeHelmTemplateContent(value: string): string {
-  const withoutConditionalBlocks = value
-    .replace(/\{\{[-#]?\s*(?:if|range|with)\b[\s\S]*?\}\}[\s\S]*?\{\{[-#]?\s*(?:else|end)\b[\s\S]*?\}\}/g, " ")
-    .replace(/\{\{[-#]?\s*(?:if|range|with)\b[\s\S]*?\}\}/g, " ")
-    .replace(/\{\{[-#]?\s*(?:else|end)\b[\s\S]*?\}\}/g, " ");
+  const withoutConditionalBlocks = stripHelmControlFlow(value);
 
   return withoutConditionalBlocks.replace(
     /\{\{[-#]?\s*(?:include|tpl|template|printf|toYaml|toJson|quote|default|required|trim|trimSuffix|trimPrefix|replace|split|join|list|dict|coalesce|first|last|title|lower|upper|b64enc|b64dec|if|range|with|else|end|eq|ne|lt|gt|and|or|not)\b[\s\S]*?[-#]?\s*\}\}/g,
@@ -285,6 +390,51 @@ function stripYamlComments(rawText: string): string {
   }
 
   return result;
+}
+
+// Finds every `capabilities:` key (block-style, with nothing else on its own
+// line) and returns each one's own body text - every immediately-following
+// line indented strictly more than the `capabilities:` line itself, stopping
+// at the first line indented the same or less (a dedent back to a sibling
+// key, or a blank line inside the block extends it rather than ending it).
+// This bounds each block by real YAML structure rather than a fixed-width
+// regex span, so a dedented sibling key (e.g. `env:`) is never mistaken for
+// part of the capabilities block, and a chart with multiple containers
+// yields one entry per container's own capabilities block.
+function extractCapabilitiesBlocks(rawText: string): string[] {
+  const lines = rawText.split(/\r?\n/);
+  const blocks: string[] = [];
+
+  for (let i = 0; i < lines.length; i += 1) {
+    const headerMatch = /^([ \t]*)capabilities:[ \t]*$/i.exec(lines[i]);
+    if (!headerMatch) continue;
+
+    const headerIndent = headerMatch[1].length;
+    const blockLines: string[] = [];
+    let j = i + 1;
+
+    while (j < lines.length) {
+      const line = lines[j];
+      if (line.trim() === "") {
+        blockLines.push(line);
+        j += 1;
+        continue;
+      }
+
+      const indentMatch = /^([ \t]*)\S/.exec(line);
+      const indent = indentMatch ? indentMatch[1].length : 0;
+      if (indent <= headerIndent) {
+        break;
+      }
+
+      blockLines.push(line);
+      j += 1;
+    }
+
+    blocks.push(blockLines.join("\n"));
+  }
+
+  return blocks;
 }
 
 function analyzeHelmChart(rawText: string): Finding[] {
@@ -457,8 +607,8 @@ function analyzeHelmChart(rawText: string): Finding[] {
     });
   }
 
-  const hasResourceRequests = /requests:\s*\n\s*cpu:|memory:/i.test(rawText);
-  const hasResourceLimits = /limits:\s*\n\s*cpu:|memory:/i.test(rawText);
+  const hasResourceRequests = /requests:\s*\n\s*(?:cpu|memory):/i.test(rawText);
+  const hasResourceLimits = /limits:\s*\n\s*(?:cpu|memory):/i.test(rawText);
 
   if (hasResourceRequests) {
     findings.push({
@@ -539,12 +689,33 @@ function analyzeHelmChart(rawText: string): Finding[] {
     });
   }
 
+  // Shared comment-safe text for the whole-document security checks below
+  // that must not fire on a `#` comment merely mentioning a risky setting.
+  // Computed once and reused (including by the plaintext-credential check
+  // further down) so stripYamlComments is never invoked more than once per
+  // analysis.
+  const commentSafeText = stripYamlComments(rawText);
+
   const hasSecurityContext = /securityContext:/i.test(rawText);
   const runAsNonRoot = /runAsNonRoot:\s*true/i.test(rawText);
-  const privileged = /privileged:\s*true/i.test(rawText);
+  const privileged = /privileged:\s*true/i.test(commentSafeText);
   const allowPrivilegeEscalation = /allowPrivilegeEscalation:\s*true/i.test(rawText);
   const capabilities = /capabilities:/i.test(rawText);
-  const dangerousCapabilities = /(ADD|NET_ADMIN|NET_RAW|SYS_ADMIN|SYS_MODULE|SYS_PTRACE|ALL)/i.test(rawText);
+  // A capability is only "dangerous" when it is genuinely present in a
+  // capabilities.add list - never from a drop: list (even the recommended
+  // `drop: ["ALL"]`), and never from an unrelated `add:` key elsewhere in
+  // the document (e.g. a custom annotation merge-strategy field). Every
+  // `capabilities:` block in the document is located and bounded by
+  // indentation (extractCapabilitiesBlocks), so multiple containers are all
+  // checked, and only each block's own `add:` value - flow-style or
+  // block-style, matching the existing extraction pattern - is searched
+  // with word-boundary matching.
+  const capabilitiesBlocks = extractCapabilitiesBlocks(rawText);
+  const dangerousCapabilityPattern = /\b(?:ADD|NET_ADMIN|NET_RAW|SYS_ADMIN|SYS_MODULE|SYS_PTRACE|ALL)\b/i;
+  const dangerousCapabilities = capabilitiesBlocks.some((blockText) => {
+    const addMatch = blockText.match(/\badd:[ \t]*(\[[^\]\n]*\]|(?:\n(?:[ \t]*-[ \t]*\S[^\n]*\n?)+))/i);
+    return addMatch !== null && dangerousCapabilityPattern.test(addMatch[1]);
+  });
 
   if (hasSecurityContext) {
     findings.push({
@@ -818,7 +989,7 @@ function analyzeHelmChart(rawText: string): Finding[] {
   const safeEnvFromEntryFlow =
     /-[ \t]*(?:secretRef|configMapRef)[ \t]*:[ \t]*\{[^{}\n]*\}[^\n]*\n?/gi;
 
-  const textForPlaintextCheck = stripYamlComments(rawText)
+  const textForPlaintextCheck = commentSafeText
     .replace(referenceBackedEnvEntry, " ")
     .replace(flowStyleValueFromEntry, " ")
     .replace(safeEnvFromEntryBlock, " ")
@@ -873,7 +1044,7 @@ function analyzeHelmChart(rawText: string): Finding[] {
     });
   }
 
-  if (/hostNetwork:\s*true/i.test(rawText)) {
+  if (/hostNetwork:\s*true/i.test(commentSafeText)) {
     findings.push({
       title: "Host network enabled",
       severity: "WARNING",
@@ -888,7 +1059,7 @@ function analyzeHelmChart(rawText: string): Finding[] {
     });
   }
 
-  if (/hostPID:\s*true/i.test(rawText)) {
+  if (/hostPID:\s*true/i.test(commentSafeText)) {
     findings.push({
       title: "Host PID namespace enabled",
       severity: "WARNING",
@@ -903,7 +1074,7 @@ function analyzeHelmChart(rawText: string): Finding[] {
     });
   }
 
-  if (/hostPath:/i.test(rawText)) {
+  if (/hostPath:/i.test(commentSafeText)) {
     findings.push({
       title: "HostPath mount detected",
       severity: "WARNING",

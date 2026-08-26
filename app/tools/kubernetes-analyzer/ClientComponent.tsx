@@ -67,6 +67,470 @@ function getHighRiskCapabilities() {
   ]);
 }
 
+// True when `image` carries an explicit tag or digest, based on the final
+// `/`-separated path segment only (repository[:tag] or repository@digest).
+// A registry host of the form host:port (e.g. myregistry.io:5000/myapp) can
+// only ever appear before the first `/`, so a colon anywhere earlier in the
+// string is never a tag separator - checking the whole string with
+// `.includes(":")` was fooled by exactly that case.
+function hasExplicitImageTag(image: string): boolean {
+  const lastSegment = image.split("/").pop() || "";
+  return lastSegment.includes(":") || lastSegment.includes("@");
+}
+
+type ContainerKind = "container" | "initContainer" | "ephemeralContainer";
+
+// Runs every container-level check against a single container, shared by
+// analyzeDeployment and analyzeWorkload for all three container arrays a
+// pod spec can define (containers, initContainers, ephemeralContainers) so
+// the same checks aren't hand-duplicated three times. Findings are labeled
+// with an init:/ephemeral: prefix so it's clear which container produced
+// them; plain containers keep their existing unprefixed titles exactly as
+// before. ephemeralContainers do not support resources, ports, or probes
+// (rejected by the Kubernetes API server if set), so those checks are
+// skipped for that container kind rather than reporting on fields that
+// can never legitimately be present.
+function analyzeContainerChecks(
+  container: any,
+  podSpec: any,
+  index: number,
+  containerKind: ContainerKind
+): Check[] {
+  const checks: Check[] = [];
+  const namePrefix =
+    containerKind === "initContainer" ? "init" : containerKind === "ephemeralContainer" ? "ephemeral" : null;
+  const baseName = container?.name || `container-${index + 1}`;
+  const containerName = namePrefix ? `${namePrefix}:${baseName}` : baseName;
+  const supportsResourcesAndProbes = containerKind !== "ephemeralContainer";
+
+  const image = container?.image || "";
+
+  if (!image) {
+    checks.push({
+      title: `${containerName}: image missing`,
+      severity: "critical",
+      description:
+        "The container does not specify a container image.",
+      recommendation:
+        "Set a valid container image.",
+    });
+  } else if (
+    image.endsWith(":latest") ||
+    image === "latest" ||
+    !hasExplicitImageTag(image)
+  ) {
+    checks.push({
+      title: `${containerName}: mutable image tag`,
+      severity: "warning",
+      description:
+        `Container uses "${image}", which may change over time.`,
+      recommendation:
+        "Use a fixed image version or digest.",
+    });
+  } else {
+    checks.push({
+      title: `${containerName}: fixed image version`,
+      severity: "pass",
+      description:
+        `Container uses image "${image}".`,
+    });
+  }
+
+  if (supportsResourcesAndProbes) {
+    const resources = container?.resources;
+
+    if (resources?.requests && resources?.limits) {
+      checks.push({
+        title: `${containerName}: resource requests and limits`,
+        severity: "pass",
+        description:
+          "CPU and memory resource configuration is present.",
+      });
+    } else {
+      checks.push({
+        title: `${containerName}: resources missing`,
+        severity: "warning",
+        description:
+          "Resource requests and/or limits are not configured.",
+        recommendation:
+          "Define CPU and memory requests and limits to improve scheduling and resource control.",
+      });
+    }
+  }
+
+  const securityContext = getEffectiveSecurityContext(container, podSpec);
+
+  if (securityContext?.runAsNonRoot === true) {
+    checks.push({
+      title: `${containerName}: non-root execution`,
+      severity: "pass",
+      description:
+        "The workload explicitly requires non-root execution.",
+    });
+  } else {
+    checks.push({
+      title: `${containerName}: non-root execution`,
+      severity: "warning",
+      description:
+        "The container does not explicitly require non-root execution.",
+      recommendation:
+        "Consider setting securityContext.runAsNonRoot: true.",
+    });
+  }
+
+  if (typeof securityContext?.runAsUser === "number") {
+    if (securityContext.runAsUser === 0) {
+      const rootSeverity =
+        securityContext?.privileged === true ||
+        securityContext?.allowPrivilegeEscalation === true
+          ? "critical"
+          : "warning";
+
+      checks.push({
+        title: `${containerName}: runAsUser`,
+        severity: rootSeverity,
+        description:
+          "The container is explicitly configured to run as UID 0.",
+        recommendation:
+          "Set a non-root user ID unless the workload explicitly requires root privileges.",
+      });
+    } else {
+      checks.push({
+        title: `${containerName}: runAsUser`,
+        severity: "pass",
+        description: `The container is explicitly configured to run as UID ${securityContext.runAsUser}.`,
+      });
+    }
+  } else {
+    checks.push({
+      title: `${containerName}: runAsUser`,
+      severity: "warning",
+      description:
+        "The container does not explicitly define a user ID.",
+      recommendation:
+        "Set securityContext.runAsUser to a non-root UID when possible.",
+    });
+  }
+
+  if (securityContext?.privileged === true) {
+    checks.push({
+      title: `${containerName}: privileged container`,
+      severity: "critical",
+      description:
+        "The container is configured as privileged.",
+      recommendation:
+        "Remove privileged mode unless it is explicitly required.",
+    });
+  } else {
+    checks.push({
+      title: `${containerName}: privileged mode`,
+      severity: "pass",
+      description:
+        "The container is not explicitly configured as privileged.",
+    });
+  }
+
+  if (securityContext?.allowPrivilegeEscalation === true) {
+    checks.push({
+      title: `${containerName}: allowPrivilegeEscalation`,
+      severity: "critical",
+      description:
+        "The container explicitly sets allowPrivilegeEscalation: true.",
+      recommendation:
+        "Set securityContext.allowPrivilegeEscalation: false unless the workload explicitly requires privilege escalation.",
+    });
+  } else if (securityContext?.allowPrivilegeEscalation === false) {
+    checks.push({
+      title: `${containerName}: allowPrivilegeEscalation`,
+      severity: "pass",
+      description:
+        "The container explicitly disables privilege escalation.",
+    });
+  } else {
+    checks.push({
+      title: `${containerName}: allowPrivilegeEscalation`,
+      severity: "warning",
+      description:
+        "The container does not explicitly define allowPrivilegeEscalation.",
+      recommendation:
+        "Set securityContext.allowPrivilegeEscalation: false unless the workload explicitly requires privilege escalation.",
+    });
+  }
+
+  const capabilities = securityContext?.capabilities || {};
+  const addedCapabilities = Array.isArray(capabilities.add)
+    ? capabilities.add
+        .map((cap: any) => String(cap).trim())
+        .filter(Boolean)
+    : [];
+  const droppedCapabilities = Array.isArray(capabilities.drop)
+    ? capabilities.drop
+        .map((cap: any) => String(cap).trim())
+        .filter(Boolean)
+    : [];
+
+  if (addedCapabilities.length > 0) {
+    const dangerousCaps = addedCapabilities.filter((cap: string) =>
+      getHighRiskCapabilities().has(cap.toUpperCase())
+    );
+
+    checks.push({
+      title: `${containerName}: capabilities.add`,
+      severity: dangerousCaps.length > 0 ? "critical" : "warning",
+      description: `The container adds Linux capabilities: ${addedCapabilities.join(", ")}.`,
+      recommendation:
+        "Consider dropping all Linux capabilities and adding back only the capabilities required by the application.",
+    });
+  } else {
+    checks.push({
+      title: `${containerName}: capabilities.add`,
+      severity: "pass",
+      description: "The container does not add Linux capabilities.",
+    });
+  }
+
+  if (droppedCapabilities.includes("ALL") || droppedCapabilities.includes("all")) {
+    checks.push({
+      title: `${containerName}: capabilities.drop`,
+      severity: "pass",
+      description: "The container drops all Linux capabilities.",
+    });
+  } else {
+    checks.push({
+      title: `${containerName}: capabilities.drop`,
+      severity: "warning",
+      description:
+        "The container does not explicitly drop all Linux capabilities.",
+      recommendation:
+        "Consider dropping all Linux capabilities and adding back only the capabilities required by the application.",
+    });
+  }
+
+  if (securityContext?.readOnlyRootFilesystem === true) {
+    checks.push({
+      title: `${containerName}: readOnlyRootFilesystem`,
+      severity: "pass",
+      description: "The container root filesystem is read-only.",
+    });
+  } else {
+    checks.push({
+      title: `${containerName}: readOnlyRootFilesystem`,
+      severity: "warning",
+      description: "The container root filesystem is writable.",
+      recommendation:
+        "Set securityContext.readOnlyRootFilesystem: true where the application supports a read-only root filesystem.",
+    });
+  }
+
+  const seccompType = securityContext?.seccompProfile?.type;
+  if (seccompType === "RuntimeDefault" || seccompType === "Localhost") {
+    checks.push({
+      title: `${containerName}: seccompProfile`,
+      severity: "pass",
+      description: `The container explicitly configures seccompProfile.type as "${seccompType}".`,
+    });
+  } else {
+    checks.push({
+      title: `${containerName}: seccompProfile`,
+      severity: "warning",
+      description:
+        "The container does not explicitly configure a seccomp profile.",
+      recommendation:
+        "Set seccompProfile.type to RuntimeDefault or an approved profile.",
+    });
+  }
+
+  if (supportsResourcesAndProbes) {
+    const hostPortValues = (container?.ports || [])
+      .filter((port: any) => typeof port?.hostPort === "number")
+      .map((port: any) => `${port.containerPort || "unknown"}:${port.hostPort}`);
+
+    if (hostPortValues.length > 0) {
+      checks.push({
+        title: `${containerName}: hostPort`,
+        severity: "warning",
+        description: `The container is bound to host ports: ${hostPortValues.join(", ")}.`,
+        recommendation:
+          "Prefer a Kubernetes Service instead of hostPort unless node-level port binding is explicitly required.",
+      });
+    } else {
+      checks.push({
+        title: `${containerName}: hostPort`,
+        severity: "pass",
+        description: "The container does not bind to host ports.",
+      });
+    }
+  }
+
+  const imagePullPolicy = container?.imagePullPolicy;
+  if (typeof imagePullPolicy === "string") {
+    checks.push({
+      title: `${containerName}: imagePullPolicy`,
+      severity: "pass",
+      description: `The container explicitly sets imagePullPolicy to "${imagePullPolicy}".`,
+    });
+  } else {
+    checks.push({
+      title: `${containerName}: imagePullPolicy`,
+      severity: "warning",
+      description:
+        "The container does not explicitly set imagePullPolicy, which can create operational inconsistency.",
+      recommendation:
+        "Set imagePullPolicy explicitly to match your deployment policy and image lifecycle needs.",
+    });
+  }
+
+  if (supportsResourcesAndProbes) {
+    if (container?.startupProbe) {
+      checks.push({
+        title: `${containerName}: startupProbe`,
+        severity: "pass",
+        description: "A startup probe is configured.",
+      });
+    } else {
+      checks.push({
+        title: `${containerName}: startupProbe`,
+        severity: "warning",
+        description:
+          "No startup probe is configured for this container.",
+        recommendation:
+          "Consider adding a startupProbe for slow-starting applications to prevent premature restarts.",
+      });
+    }
+
+    if (container?.readinessProbe) {
+      checks.push({
+        title: `${containerName}: readiness probe`,
+        severity: "pass",
+        description:
+          "A readiness probe is configured.",
+      });
+    } else {
+      checks.push({
+        title: `${containerName}: readiness probe`,
+        severity: "warning",
+        description:
+          "No readiness probe is configured.",
+        recommendation:
+          "Add a readiness probe so Kubernetes can determine when the application is ready to receive traffic.",
+      });
+    }
+
+    if (container?.livenessProbe) {
+      checks.push({
+        title: `${containerName}: liveness probe`,
+        severity: "pass",
+        description:
+          "A liveness probe is configured.",
+      });
+    } else {
+      checks.push({
+        title: `${containerName}: liveness probe`,
+        severity: "warning",
+        description:
+          "No liveness probe is configured.",
+        recommendation:
+          "Add a liveness probe so Kubernetes can detect unhealthy containers.",
+      });
+    }
+  }
+
+  return checks;
+}
+
+// Runs analyzeContainerChecks across all three container arrays a pod spec
+// can define, in order: containers, then initContainers, then
+// ephemeralContainers. Missing/empty arrays default to [] and simply
+// contribute nothing, so a pod spec with only `containers` produces
+// identical output to before this function existed.
+function analyzeAllContainers(podSpec: any): Check[] {
+  const checks: Check[] = [];
+  const containers = podSpec?.containers || [];
+
+  containers.forEach((container: any, index: number) => {
+    checks.push(...analyzeContainerChecks(container, podSpec, index, "container"));
+  });
+
+  const initContainers = podSpec?.initContainers || [];
+  initContainers.forEach((container: any, index: number) => {
+    checks.push(...analyzeContainerChecks(container, podSpec, index, "initContainer"));
+  });
+
+  const ephemeralContainers = podSpec?.ephemeralContainers || [];
+  ephemeralContainers.forEach((container: any, index: number) => {
+    checks.push(...analyzeContainerChecks(container, podSpec, index, "ephemeralContainer"));
+  });
+
+  return checks;
+}
+
+// Shared by analyzeDeployment (always) and analyzeWorkload (StatefulSet
+// only - DaemonSet/Job/CronJob/Pod have no comparable replica concept).
+// `kind` is interpolated into the message text, so calling this with
+// kind="Deployment" reproduces the original Deployment-only wording
+// byte-for-byte.
+function analyzeReplicaAvailability(kind: string, replicas: unknown): Check {
+  if (typeof replicas === "number" && replicas >= 2) {
+    return {
+      title: "Multiple replicas configured",
+      severity: "pass",
+      description: `${kind} is configured with ${replicas} replicas.`,
+    };
+  }
+
+  return {
+    title: "High availability",
+    severity: "warning",
+    description: `The ${kind} does not have at least 2 replicas.`,
+    recommendation: "Consider using multiple replicas for better availability.",
+  };
+}
+
+// Workload-level (not container-level) ServiceAccount posture: whether the
+// pod auto-mounts a ServiceAccount token (defaults to true when unset) and
+// whether it uses a dedicated ServiceAccount rather than the implicit
+// "default" one. Shared by analyzeDeployment and analyzeWorkload.
+function analyzeServiceAccountPosture(podSpec: any): Check[] {
+  const checks: Check[] = [];
+
+  if (podSpec?.automountServiceAccountToken === false) {
+    checks.push({
+      title: "automountServiceAccountToken",
+      severity: "pass",
+      description: "The pod explicitly disables automatic mounting of a ServiceAccount token.",
+    });
+  } else {
+    checks.push({
+      title: "automountServiceAccountToken",
+      severity: "warning",
+      description:
+        "The pod does not explicitly disable automountServiceAccountToken, which defaults to mounting a ServiceAccount token into the pod.",
+      recommendation:
+        "Set automountServiceAccountToken: false unless the workload requires Kubernetes API access.",
+    });
+  }
+
+  const serviceAccountName = podSpec?.serviceAccountName || podSpec?.serviceAccount;
+  if (serviceAccountName && serviceAccountName !== "default") {
+    checks.push({
+      title: "serviceAccountName",
+      severity: "pass",
+      description: `The pod uses a dedicated ServiceAccount "${serviceAccountName}".`,
+    });
+  } else {
+    checks.push({
+      title: "serviceAccountName",
+      severity: "warning",
+      description:
+        "The pod does not specify a dedicated ServiceAccount and uses the default ServiceAccount for its namespace.",
+      recommendation:
+        "Create and assign a dedicated, minimally-privileged ServiceAccount instead of relying on the default ServiceAccount.",
+    });
+  }
+
+  return checks;
+}
+
 function analyzeDeployment(document: any): Check[] {
   const checks: Check[] = [];
 
@@ -75,22 +539,7 @@ function analyzeDeployment(document: any): Check[] {
   const podSpec = template?.spec;
   const containers = podSpec?.containers || [];
 
-  if (typeof spec?.replicas === "number" && spec.replicas >= 2) {
-    checks.push({
-      title: "Multiple replicas configured",
-      severity: "pass",
-      description: `Deployment is configured with ${spec.replicas} replicas.`,
-    });
-  } else {
-    checks.push({
-      title: "High availability",
-      severity: "warning",
-      description:
-        "The Deployment does not have at least 2 replicas.",
-      recommendation:
-        "Consider using multiple replicas for better availability.",
-    });
-  }
+  checks.push(analyzeReplicaAvailability(document?.kind || "Deployment", spec?.replicas));
 
   if (document?.metadata?.namespace) {
     checks.push({
@@ -178,6 +627,8 @@ function analyzeDeployment(document: any): Check[] {
     });
   }
 
+  checks.push(...analyzeServiceAccountPosture(podSpec));
+
   if (containers.length === 0) {
     checks.push({
       title: "Container configuration",
@@ -191,336 +642,7 @@ function analyzeDeployment(document: any): Check[] {
     return checks;
   }
 
-  containers.forEach((container: any, index: number) => {
-    const containerName =
-      container?.name || `container-${index + 1}`;
-
-    const image = container?.image || "";
-
-    if (!image) {
-      checks.push({
-        title: `${containerName}: image missing`,
-        severity: "critical",
-        description:
-          "The container does not specify a container image.",
-        recommendation:
-          "Set a valid container image.",
-      });
-    } else if (
-      image.endsWith(":latest") ||
-      image === "latest" ||
-      !image.includes(":")
-    ) {
-      checks.push({
-        title: `${containerName}: mutable image tag`,
-        severity: "warning",
-        description:
-          `Container uses "${image}", which may change over time.`,
-        recommendation:
-          "Use a fixed image version or digest.",
-      });
-    } else {
-      checks.push({
-        title: `${containerName}: fixed image version`,
-        severity: "pass",
-        description:
-          `Container uses image "${image}".`,
-      });
-    }
-
-    const resources = container?.resources;
-
-    if (resources?.requests && resources?.limits) {
-      checks.push({
-        title: `${containerName}: resource requests and limits`,
-        severity: "pass",
-        description:
-          "CPU and memory resource configuration is present.",
-      });
-    } else {
-      checks.push({
-        title: `${containerName}: resources missing`,
-        severity: "warning",
-        description:
-          "Resource requests and/or limits are not configured.",
-        recommendation:
-          "Define CPU and memory requests and limits to improve scheduling and resource control.",
-      });
-    }
-
-    const securityContext = getEffectiveSecurityContext(container, podSpec);
-
-    if (securityContext?.runAsNonRoot === true) {
-      checks.push({
-        title: `${containerName}: non-root execution`,
-        severity: "pass",
-        description:
-          "The workload explicitly requires non-root execution.",
-      });
-    } else {
-      checks.push({
-        title: `${containerName}: non-root execution`,
-        severity: "warning",
-        description:
-          "The container does not explicitly require non-root execution.",
-        recommendation:
-          "Consider setting securityContext.runAsNonRoot: true.",
-      });
-    }
-
-    if (typeof securityContext?.runAsUser === "number") {
-      if (securityContext.runAsUser === 0) {
-        const rootSeverity =
-          securityContext?.privileged === true ||
-          securityContext?.allowPrivilegeEscalation === true
-            ? "critical"
-            : "warning";
-
-        checks.push({
-          title: `${containerName}: runAsUser`,
-          severity: rootSeverity,
-          description:
-            "The container is explicitly configured to run as UID 0.",
-          recommendation:
-            "Set a non-root user ID unless the workload explicitly requires root privileges.",
-        });
-      } else {
-        checks.push({
-          title: `${containerName}: runAsUser`,
-          severity: "pass",
-          description: `The container is explicitly configured to run as UID ${securityContext.runAsUser}.`,
-        });
-      }
-    } else {
-      checks.push({
-        title: `${containerName}: runAsUser`,
-        severity: "warning",
-        description:
-          "The container does not explicitly define a user ID.",
-        recommendation:
-          "Set securityContext.runAsUser to a non-root UID when possible.",
-      });
-    }
-
-    if (securityContext?.privileged === true) {
-      checks.push({
-        title: `${containerName}: privileged container`,
-        severity: "critical",
-        description:
-          "The container is configured as privileged.",
-        recommendation:
-          "Remove privileged mode unless it is explicitly required.",
-      });
-    } else {
-      checks.push({
-        title: `${containerName}: privileged mode`,
-        severity: "pass",
-        description:
-          "The container is not explicitly configured as privileged.",
-      });
-    }
-
-    if (securityContext?.allowPrivilegeEscalation === true) {
-      checks.push({
-        title: `${containerName}: allowPrivilegeEscalation`,
-        severity: "critical",
-        description:
-          "The container explicitly sets allowPrivilegeEscalation: true.",
-        recommendation:
-          "Set securityContext.allowPrivilegeEscalation: false unless the workload explicitly requires privilege escalation.",
-      });
-    } else if (securityContext?.allowPrivilegeEscalation === false) {
-      checks.push({
-        title: `${containerName}: allowPrivilegeEscalation`,
-        severity: "pass",
-        description:
-          "The container explicitly disables privilege escalation.",
-      });
-    } else {
-      checks.push({
-        title: `${containerName}: allowPrivilegeEscalation`,
-        severity: "warning",
-        description:
-          "The container does not explicitly define allowPrivilegeEscalation.",
-        recommendation:
-          "Set securityContext.allowPrivilegeEscalation: false unless the workload explicitly requires privilege escalation.",
-      });
-    }
-
-    const capabilities = securityContext?.capabilities || {};
-    const addedCapabilities = Array.isArray(capabilities.add)
-      ? capabilities.add
-          .map((cap: any) => String(cap).trim())
-          .filter(Boolean)
-      : [];
-    const droppedCapabilities = Array.isArray(capabilities.drop)
-      ? capabilities.drop
-          .map((cap: any) => String(cap).trim())
-          .filter(Boolean)
-      : [];
-
-    if (addedCapabilities.length > 0) {
-      const dangerousCaps = addedCapabilities.filter((cap: string) =>
-        getHighRiskCapabilities().has(cap.toUpperCase())
-      );
-
-      checks.push({
-        title: `${containerName}: capabilities.add`,
-        severity: dangerousCaps.length > 0 ? "critical" : "warning",
-        description: `The container adds Linux capabilities: ${addedCapabilities.join(", ")}.`,
-        recommendation:
-          "Consider dropping all Linux capabilities and adding back only the capabilities required by the application.",
-      });
-    } else {
-      checks.push({
-        title: `${containerName}: capabilities.add`,
-        severity: "pass",
-        description: "The container does not add Linux capabilities.",
-      });
-    }
-
-    if (droppedCapabilities.includes("ALL") || droppedCapabilities.includes("all")) {
-      checks.push({
-        title: `${containerName}: capabilities.drop`,
-        severity: "pass",
-        description: "The container drops all Linux capabilities.",
-      });
-    } else {
-      checks.push({
-        title: `${containerName}: capabilities.drop`,
-        severity: "warning",
-        description:
-          "The container does not explicitly drop all Linux capabilities.",
-        recommendation:
-          "Consider dropping all Linux capabilities and adding back only the capabilities required by the application.",
-      });
-    }
-
-    if (securityContext?.readOnlyRootFilesystem === true) {
-      checks.push({
-        title: `${containerName}: readOnlyRootFilesystem`,
-        severity: "pass",
-        description: "The container root filesystem is read-only.",
-      });
-    } else {
-      checks.push({
-        title: `${containerName}: readOnlyRootFilesystem`,
-        severity: "warning",
-        description: "The container root filesystem is writable.",
-        recommendation:
-          "Set securityContext.readOnlyRootFilesystem: true where the application supports a read-only root filesystem.",
-      });
-    }
-
-    const seccompType = securityContext?.seccompProfile?.type;
-    if (seccompType === "RuntimeDefault" || seccompType === "Localhost") {
-      checks.push({
-        title: `${containerName}: seccompProfile`,
-        severity: "pass",
-        description: `The container explicitly configures seccompProfile.type as "${seccompType}".`,
-      });
-    } else {
-      checks.push({
-        title: `${containerName}: seccompProfile`,
-        severity: "warning",
-        description:
-          "The container does not explicitly configure a seccomp profile.",
-        recommendation:
-          "Set seccompProfile.type to RuntimeDefault or an approved profile.",
-      });
-    }
-
-    const hostPortValues = (container?.ports || [])
-      .filter((port: any) => typeof port?.hostPort === "number")
-      .map((port: any) => `${port.containerPort || "unknown"}:${port.hostPort}`);
-
-    if (hostPortValues.length > 0) {
-      checks.push({
-        title: `${containerName}: hostPort`,
-        severity: "warning",
-        description: `The container is bound to host ports: ${hostPortValues.join(", ")}.`,
-        recommendation:
-          "Prefer a Kubernetes Service instead of hostPort unless node-level port binding is explicitly required.",
-      });
-    } else {
-      checks.push({
-        title: `${containerName}: hostPort`,
-        severity: "pass",
-        description: "The container does not bind to host ports.",
-      });
-    }
-
-    const imagePullPolicy = container?.imagePullPolicy;
-    if (typeof imagePullPolicy === "string") {
-      checks.push({
-        title: `${containerName}: imagePullPolicy`,
-        severity: "pass",
-        description: `The container explicitly sets imagePullPolicy to "${imagePullPolicy}".`,
-      });
-    } else {
-      checks.push({
-        title: `${containerName}: imagePullPolicy`,
-        severity: "warning",
-        description:
-          "The container does not explicitly set imagePullPolicy, which can create operational inconsistency.",
-        recommendation:
-          "Set imagePullPolicy explicitly to match your deployment policy and image lifecycle needs.",
-      });
-    }
-
-    if (container?.startupProbe) {
-      checks.push({
-        title: `${containerName}: startupProbe`,
-        severity: "pass",
-        description: "A startup probe is configured.",
-      });
-    } else {
-      checks.push({
-        title: `${containerName}: startupProbe`,
-        severity: "warning",
-        description:
-          "No startup probe is configured for this container.",
-        recommendation:
-          "Consider adding a startupProbe for slow-starting applications to prevent premature restarts.",
-      });
-    }
-
-    if (container?.readinessProbe) {
-      checks.push({
-        title: `${containerName}: readiness probe`,
-        severity: "pass",
-        description:
-          "A readiness probe is configured.",
-      });
-    } else {
-      checks.push({
-        title: `${containerName}: readiness probe`,
-        severity: "warning",
-        description:
-          "No readiness probe is configured.",
-        recommendation:
-          "Add a readiness probe so Kubernetes can determine when the application is ready to receive traffic.",
-      });
-    }
-
-    if (container?.livenessProbe) {
-      checks.push({
-        title: `${containerName}: liveness probe`,
-        severity: "pass",
-        description:
-          "A liveness probe is configured.",
-      });
-    } else {
-      checks.push({
-        title: `${containerName}: liveness probe`,
-        severity: "warning",
-        description:
-          "No liveness probe is configured.",
-        recommendation:
-          "Add a liveness probe so Kubernetes can detect unhealthy containers.",
-      });
-    }
-  });
+  checks.push(...analyzeAllContainers(podSpec));
 
   return checks;
 }
@@ -561,6 +683,14 @@ function getPodSpec(document: any): any | null {
 
 function analyzeWorkload(document: any): Check[] {
   const checks: Check[] = [];
+
+  // StatefulSet has the same meaningful spec.replicas concept as
+  // Deployment; DaemonSet/Job/CronJob/Pod do not (DaemonSet runs one pod
+  // per node, Job/CronJob use parallelism, Pod has no replica concept at
+  // all), so the check is intentionally scoped to StatefulSet only.
+  if (document?.kind === "StatefulSet") {
+    checks.push(analyzeReplicaAvailability(document.kind, document?.spec?.replicas));
+  }
 
   if (document?.metadata?.namespace) {
     checks.push({
@@ -650,6 +780,8 @@ function analyzeWorkload(document: any): Check[] {
     });
   }
 
+  checks.push(...analyzeServiceAccountPosture(podSpec));
+
   if (!podSpec) {
     checks.push({
       title: "Pod template",
@@ -673,310 +805,7 @@ function analyzeWorkload(document: any): Check[] {
     return checks;
   }
 
-  containers.forEach((container: any, index: number) => {
-    const containerName = container?.name || `container-${index + 1}`;
-
-    const image = container?.image || "";
-
-    if (!image) {
-      checks.push({
-        title: `${containerName}: image missing`,
-        severity: "critical",
-        description: "The container does not specify a container image.",
-        recommendation: "Set a valid container image.",
-      });
-    } else if (
-      image.endsWith(":latest") ||
-      image === "latest" ||
-      !image.includes(":")
-    ) {
-      checks.push({
-        title: `${containerName}: mutable image tag`,
-        severity: "warning",
-        description: `Container uses "${image}", which may change over time.`,
-        recommendation: "Use a fixed image version or digest.",
-      });
-    } else {
-      checks.push({
-        title: `${containerName}: fixed image version`,
-        severity: "pass",
-        description: `Container uses image "${image}".`,
-      });
-    }
-
-    const resources = container?.resources;
-
-    if (resources?.requests && resources?.limits) {
-      checks.push({
-        title: `${containerName}: resource requests and limits`,
-        severity: "pass",
-        description: "CPU and memory resource configuration is present.",
-      });
-    } else {
-      checks.push({
-        title: `${containerName}: resources missing`,
-        severity: "warning",
-        description: "Resource requests and/or limits are not configured.",
-        recommendation:
-          "Define CPU and memory requests and limits to improve scheduling and resource control.",
-      });
-    }
-
-    const securityContext = getEffectiveSecurityContext(container, podSpec);
-
-    if (securityContext?.runAsNonRoot === true) {
-      checks.push({
-        title: `${containerName}: non-root execution`,
-        severity: "pass",
-        description: "The workload explicitly requires non-root execution.",
-      });
-    } else {
-      checks.push({
-        title: `${containerName}: non-root execution`,
-        severity: "warning",
-        description: "The container does not explicitly require non-root execution.",
-        recommendation: "Consider setting securityContext.runAsNonRoot: true.",
-      });
-    }
-
-    if (typeof securityContext?.runAsUser === "number") {
-      if (securityContext.runAsUser === 0) {
-        const rootSeverity =
-          securityContext?.privileged === true || securityContext?.allowPrivilegeEscalation === true
-            ? "critical"
-            : "warning";
-
-        checks.push({
-          title: `${containerName}: runAsUser`,
-          severity: rootSeverity,
-          description: "The container is explicitly configured to run as UID 0.",
-          recommendation:
-            "Set a non-root user ID unless the workload explicitly requires root privileges.",
-        });
-      } else {
-        checks.push({
-          title: `${containerName}: runAsUser`,
-          severity: "pass",
-          description: `The container is explicitly configured to run as UID ${securityContext.runAsUser}.`,
-        });
-      }
-    } else {
-      checks.push({
-        title: `${containerName}: runAsUser`,
-        severity: "warning",
-        description: "The container does not explicitly define a user ID.",
-        recommendation: "Set securityContext.runAsUser to a non-root UID when possible.",
-      });
-    }
-
-    if (securityContext?.privileged === true) {
-      checks.push({
-        title: `${containerName}: privileged container`,
-        severity: "critical",
-        description: "The container is configured as privileged.",
-        recommendation: "Remove privileged mode unless it is explicitly required.",
-      });
-    } else {
-      checks.push({
-        title: `${containerName}: privileged mode`,
-        severity: "pass",
-        description: "The container is not explicitly configured as privileged.",
-      });
-    }
-
-    if (securityContext?.allowPrivilegeEscalation === true) {
-      checks.push({
-        title: `${containerName}: allowPrivilegeEscalation`,
-        severity: "critical",
-        description: "The container explicitly sets allowPrivilegeEscalation: true.",
-        recommendation:
-          "Set securityContext.allowPrivilegeEscalation: false unless the workload explicitly requires privilege escalation.",
-      });
-    } else if (securityContext?.allowPrivilegeEscalation === false) {
-      checks.push({
-        title: `${containerName}: allowPrivilegeEscalation`,
-        severity: "pass",
-        description: "The container explicitly disables privilege escalation.",
-      });
-    } else {
-      checks.push({
-        title: `${containerName}: allowPrivilegeEscalation`,
-        severity: "warning",
-        description: "The container does not explicitly define allowPrivilegeEscalation.",
-        recommendation:
-          "Set securityContext.allowPrivilegeEscalation: false unless the workload explicitly requires privilege escalation.",
-      });
-    }
-
-    const capabilities = securityContext?.capabilities || {};
-    const addedCapabilities = Array.isArray(capabilities.add)
-      ? capabilities.add
-          .map((cap: any) => String(cap).trim())
-          .filter(Boolean)
-      : [];
-    const droppedCapabilities = Array.isArray(capabilities.drop)
-      ? capabilities.drop
-          .map((cap: any) => String(cap).trim())
-          .filter(Boolean)
-      : [];
-
-    if (addedCapabilities.length > 0) {
-      const dangerousCaps = addedCapabilities.filter((cap: string) =>
-        getHighRiskCapabilities().has(cap.toUpperCase())
-      );
-
-      checks.push({
-        title: `${containerName}: capabilities.add`,
-        severity: dangerousCaps.length > 0 ? "critical" : "warning",
-        description: `The container adds Linux capabilities: ${addedCapabilities.join(", ")}.`,
-        recommendation:
-          "Consider dropping all Linux capabilities and adding back only the capabilities required by the application.",
-      });
-    } else {
-      checks.push({
-        title: `${containerName}: capabilities.add`,
-        severity: "pass",
-        description: "The container does not add Linux capabilities.",
-      });
-    }
-
-    if (droppedCapabilities.includes("ALL") || droppedCapabilities.includes("all")) {
-      checks.push({
-        title: `${containerName}: capabilities.drop`,
-        severity: "pass",
-        description: "The container drops all Linux capabilities.",
-      });
-    } else {
-      checks.push({
-        title: `${containerName}: capabilities.drop`,
-        severity: "warning",
-        description:
-          "The container does not explicitly drop all Linux capabilities.",
-        recommendation:
-          "Consider dropping all Linux capabilities and adding back only the capabilities required by the application.",
-      });
-    }
-
-    if (securityContext?.readOnlyRootFilesystem === true) {
-      checks.push({
-        title: `${containerName}: readOnlyRootFilesystem`,
-        severity: "pass",
-        description: "The container root filesystem is read-only.",
-      });
-    } else {
-      checks.push({
-        title: `${containerName}: readOnlyRootFilesystem`,
-        severity: "warning",
-        description: "The container root filesystem is writable.",
-        recommendation:
-          "Set securityContext.readOnlyRootFilesystem: true where the application supports a read-only root filesystem.",
-      });
-    }
-
-    const seccompType = securityContext?.seccompProfile?.type;
-    if (seccompType === "RuntimeDefault" || seccompType === "Localhost") {
-      checks.push({
-        title: `${containerName}: seccompProfile`,
-        severity: "pass",
-        description: `The container explicitly configures seccompProfile.type as "${seccompType}".`,
-      });
-    } else {
-      checks.push({
-        title: `${containerName}: seccompProfile`,
-        severity: "warning",
-        description:
-          "The container does not explicitly configure a seccomp profile.",
-        recommendation:
-          "Set seccompProfile.type to RuntimeDefault or an approved profile.",
-      });
-    }
-
-    const hostPortValues = (container?.ports || [])
-      .filter((port: any) => typeof port?.hostPort === "number")
-      .map((port: any) => `${port.containerPort || "unknown"}:${port.hostPort}`);
-
-    if (hostPortValues.length > 0) {
-      checks.push({
-        title: `${containerName}: hostPort`,
-        severity: "warning",
-        description: `The container is bound to host ports: ${hostPortValues.join(", ")}.`,
-        recommendation:
-          "Prefer a Kubernetes Service instead of hostPort unless node-level port binding is explicitly required.",
-      });
-    } else {
-      checks.push({
-        title: `${containerName}: hostPort`,
-        severity: "pass",
-        description: "The container does not bind to host ports.",
-      });
-    }
-
-    const imagePullPolicy = container?.imagePullPolicy;
-    if (typeof imagePullPolicy === "string") {
-      checks.push({
-        title: `${containerName}: imagePullPolicy`,
-        severity: "pass",
-        description: `The container explicitly sets imagePullPolicy to "${imagePullPolicy}".`,
-      });
-    } else {
-      checks.push({
-        title: `${containerName}: imagePullPolicy`,
-        severity: "warning",
-        description:
-          "The container does not explicitly set imagePullPolicy, which can create operational inconsistency.",
-        recommendation:
-          "Set imagePullPolicy explicitly to match your deployment policy and image lifecycle needs.",
-      });
-    }
-
-    if (container?.startupProbe) {
-      checks.push({
-        title: `${containerName}: startupProbe`,
-        severity: "pass",
-        description: "A startup probe is configured.",
-      });
-    } else {
-      checks.push({
-        title: `${containerName}: startupProbe`,
-        severity: "warning",
-        description:
-          "No startup probe is configured for this container.",
-        recommendation:
-          "Consider adding a startupProbe for slow-starting applications to prevent premature restarts.",
-      });
-    }
-
-    if (container?.readinessProbe) {
-      checks.push({
-        title: `${containerName}: readiness probe`,
-        severity: "pass",
-        description: "A readiness probe is configured.",
-      });
-    } else {
-      checks.push({
-        title: `${containerName}: readiness probe`,
-        severity: "warning",
-        description: "No readiness probe is configured.",
-        recommendation:
-          "Add a readiness probe so Kubernetes can determine when the application is ready to receive traffic.",
-      });
-    }
-
-    if (container?.livenessProbe) {
-      checks.push({
-        title: `${containerName}: liveness probe`,
-        severity: "pass",
-        description: "A liveness probe is configured.",
-      });
-    } else {
-      checks.push({
-        title: `${containerName}: liveness probe`,
-        severity: "warning",
-        description: "No liveness probe is configured.",
-        recommendation: "Add a liveness probe so Kubernetes can detect unhealthy containers.",
-      });
-    }
-  });
+  checks.push(...analyzeAllContainers(podSpec));
 
   return checks;
 }
@@ -1550,54 +1379,63 @@ function analyzeRbac(document: any): Check[] {
   const kind = document?.kind;
   const name = getResourceName(document);
   const namespace = getResourceNamespace(document);
+  // RoleBinding/ClusterRoleBinding never have a `rules` field at all (only
+  // `subjects` + `roleRef`) - only Role/ClusterRole do. Evaluating `rules`
+  // for a binding always found it empty and returned early before the
+  // binding-specific subjects logic below ever ran, producing a misleading
+  // "does not define any rules" warning and making the dedicated
+  // "no subjects" check unreachable for every binding.
+  const isBindingKind = kind === "RoleBinding" || kind === "ClusterRoleBinding";
 
-  const rules = Array.isArray(document?.rules) ? document.rules : [];
+  if (!isBindingKind) {
+    const rules = Array.isArray(document?.rules) ? document.rules : [];
 
-  if (rules.length === 0) {
-    checks.push({
-      title: "RBAC rules",
-      severity: "warning",
-      description: `${kind} ${name} does not define any rules in the supplied manifest.`,
-      recommendation: "Define the minimum allowed permissions explicitly for the role or cluster role.",
+    if (rules.length === 0) {
+      checks.push({
+        title: "RBAC rules",
+        severity: "warning",
+        description: `${kind} ${name} does not define any rules in the supplied manifest.`,
+        recommendation: "Define the minimum allowed permissions explicitly for the role or cluster role.",
+      });
+      return checks;
+    }
+
+    rules.forEach((rule: any, index: number) => {
+      const apiGroups = Array.isArray(rule?.apiGroups) ? rule.apiGroups.map(String) : [];
+      const resources = Array.isArray(rule?.resources) ? rule.resources.map(String) : [];
+      const verbs = Array.isArray(rule?.verbs) ? rule.verbs.map(String) : [];
+      const ruleText = JSON.stringify(rule);
+
+      const isWildcardRule =
+        resources.includes("*") ||
+        apiGroups.includes("*") ||
+        verbs.includes("*");
+
+      if (isWildcardRule) {
+        // The core Kubernetes API group (Pods, Secrets, ConfigMaps,
+        // ServiceAccounts, Namespaces, etc.) is represented as an empty
+        // string, not "*" - so a rule granting resources:"*" and verbs:"*"
+        // on the core group is just as unrestricted as apiGroups:"*" and
+        // must escalate to critical the same way.
+        const grantsAllApiGroups = apiGroups.includes("*") || apiGroups.includes("");
+
+        checks.push({
+          title: `${kind} rule ${index + 1}`,
+          severity: grantsAllApiGroups && resources.includes("*") && verbs.includes("*") ? "critical" : "warning",
+          description: `${kind} ${name} in namespace ${namespace} includes a broad wildcard rule: ${ruleText}.`,
+          recommendation: "Limit RBAC permissions to the specific resources and verbs required by the workload or controller.",
+        });
+      } else {
+        checks.push({
+          title: `${kind} rule ${index + 1}`,
+          severity: "pass",
+          description: `${kind} ${name} grants explicit permissions: ${ruleText}.`,
+        });
+      }
     });
-    return checks;
   }
 
-  rules.forEach((rule: any, index: number) => {
-    const apiGroups = Array.isArray(rule?.apiGroups) ? rule.apiGroups.map(String) : [];
-    const resources = Array.isArray(rule?.resources) ? rule.resources.map(String) : [];
-    const verbs = Array.isArray(rule?.verbs) ? rule.verbs.map(String) : [];
-    const ruleText = JSON.stringify(rule);
-
-    const isWildcardRule =
-      resources.includes("*") ||
-      apiGroups.includes("*") ||
-      verbs.includes("*");
-
-    if (isWildcardRule) {
-      // The core Kubernetes API group (Pods, Secrets, ConfigMaps,
-      // ServiceAccounts, Namespaces, etc.) is represented as an empty
-      // string, not "*" - so a rule granting resources:"*" and verbs:"*"
-      // on the core group is just as unrestricted as apiGroups:"*" and
-      // must escalate to critical the same way.
-      const grantsAllApiGroups = apiGroups.includes("*") || apiGroups.includes("");
-
-      checks.push({
-        title: `${kind} rule ${index + 1}`,
-        severity: grantsAllApiGroups && resources.includes("*") && verbs.includes("*") ? "critical" : "warning",
-        description: `${kind} ${name} in namespace ${namespace} includes a broad wildcard rule: ${ruleText}.`,
-        recommendation: "Limit RBAC permissions to the specific resources and verbs required by the workload or controller.",
-      });
-    } else {
-      checks.push({
-        title: `${kind} rule ${index + 1}`,
-        severity: "pass",
-        description: `${kind} ${name} grants explicit permissions: ${ruleText}.`,
-      });
-    }
-  });
-
-  if (kind === "RoleBinding" || kind === "ClusterRoleBinding") {
+  if (isBindingKind) {
     const subjects = Array.isArray(document?.subjects) ? document.subjects : [];
 
     if (subjects.length === 0) {
@@ -1989,27 +1827,10 @@ function analyzeYaml(input: string): {
       });
     });
 
-    const rbacResults = resources.filter((resource) => ["Role", "ClusterRole", "RoleBinding", "ClusterRoleBinding"].includes(resource.kind));
-    rbacResults.forEach((resource) => {
-      const doc = manifest.resources.find((candidate) => getResourceName(candidate) === resource.name && getResourceNamespace(candidate) === resource.namespace && candidate.kind === resource.kind);
-      if (!doc) return;
-
-      if (resource.kind === "RoleBinding" || resource.kind === "ClusterRoleBinding") {
-        const subjects = Array.isArray(doc.subjects) ? doc.subjects : [];
-        subjects.forEach((subject: any) => {
-          if (subject?.kind === "ServiceAccount") {
-            const subjectNamespace = subject?.namespace || resource.namespace;
-            const bindingKind = resource.kind === "ClusterRoleBinding" ? "cluster-wide" : "namespace-scoped";
-            resource.checks.push({
-              title: "ServiceAccount binding",
-              severity: resource.kind === "ClusterRoleBinding" ? "warning" : "pass",
-              description: `${resource.kind} ${resource.name} binds ServiceAccount ${subject.name} in namespace ${subjectNamespace} with ${bindingKind} scope.`,
-              recommendation: "Confirm the ServiceAccount is intended to receive this access and avoid cluster-wide service account bindings unless required.",
-            });
-          }
-        });
-      }
-    });
+    // Note: ServiceAccount-binding findings for RoleBinding/ClusterRoleBinding
+    // are produced directly by analyzeRbac (called per-document above) now
+    // that its subjects logic is reachable - a separate manifest-level pass
+    // here would duplicate the exact same "ServiceAccount binding" finding.
 
     return { resources };
   } catch (error) {

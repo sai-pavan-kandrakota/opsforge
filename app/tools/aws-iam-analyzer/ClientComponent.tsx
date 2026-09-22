@@ -238,7 +238,7 @@ function analyzePolicy(policyText: string): Finding[] {
   let parsed: Record<string, unknown>;
   try {
     parsed = JSON.parse(trimmed) as Record<string, unknown>;
-  } catch (_error) {
+  } catch {
     findings.push({
       title: "JSON syntax",
       severity: "CRITICAL",
@@ -1032,7 +1032,7 @@ export default function AwsIamAnalyzerPage() {
         </section>
 
         <div className="mt-6 rounded-xl border border-cyan-500/20 bg-cyan-500/5 p-4 text-sm text-cyan-100">
-          This analyzer performs static policy checks only. Validate IAM policies against your organization's security requirements before deployment.
+          This analyzer performs static policy checks only. Validate IAM policies against your organization&apos;s security requirements before deployment.
         </div>
       </div>
     </div>

@@ -115,7 +115,7 @@ function parseWorkflowYaml(yamlText: string): WorkflowDocument | null {
   try {
     const parsed = yaml.load(trimmed) as WorkflowDocument | undefined;
     return parsed && typeof parsed === "object" ? parsed : null;
-  } catch (_error) {
+  } catch {
     return null;
   }
 }
@@ -402,7 +402,6 @@ function analyzeGitHubActionsWorkflow(rawYaml: string): Finding[] {
     });
   }
 
-  const workflowPermissionsText = JSON.stringify(rawPermissions ?? {});
   const hasGitHubSecrets = /secrets\.[A-Z0-9_]+/i.test(rawYaml);
   if (hasGitHubSecrets) {
     findings.push({
@@ -451,13 +450,13 @@ function analyzeGitHubActionsWorkflow(rawYaml: string): Finding[] {
     });
   }
 
-  const pullRequestJobs = jobsArray.filter(([_, job]) => {
+  const pullRequestJobs = jobsArray.filter(([, job]) => {
     const jobObject = job && typeof job === "object" ? (job as Record<string, unknown>) : {};
     const jobIf = typeof jobObject.if === "string" ? jobObject.if : "";
     return jobIf.toLowerCase().includes("pull_request") || jobObject["if"] === "github.event_name == 'pull_request'";
   });
 
-  const dangerousPrWrite = pullRequestJobs.filter(([_, job]) => {
+  const dangerousPrWrite = pullRequestJobs.filter(([, job]) => {
     const jobObject = job && typeof job === "object" ? (job as Record<string, unknown>) : {};
     const permissions = normalizePermissions(jobObject.permissions);
     const permissionValues = Object.values(permissions);
@@ -640,7 +639,7 @@ function analyzeGitHubActionsWorkflow(rawYaml: string): Finding[] {
   }
 
   const deploymentJobs = jobsArray.filter(([jobName]) => /deploy|release|prod|production/i.test(jobName));
-  const deploymentWithoutEnvironment = deploymentJobs.filter(([jobName, job]) => {
+  const deploymentWithoutEnvironment = deploymentJobs.filter(([, job]) => {
     const jobObject = job && typeof job === "object" ? (job as Record<string, unknown>) : {};
     return !jobObject.environment;
   });

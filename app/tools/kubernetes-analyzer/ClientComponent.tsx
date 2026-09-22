@@ -21,6 +21,104 @@ type ResourceResult = {
   checks: Check[];
 };
 
+type K8sMetadata = {
+  name?: string;
+  namespace?: string;
+  labels?: Record<string, string>;
+};
+
+type K8sSecurityContext = {
+  runAsNonRoot?: boolean;
+  runAsUser?: number;
+  privileged?: boolean;
+  allowPrivilegeEscalation?: boolean;
+  readOnlyRootFilesystem?: boolean;
+  capabilities?: { add?: unknown[]; drop?: unknown[] };
+  seccompProfile?: { type?: string };
+};
+
+type K8sContainerPort = { containerPort?: number; hostPort?: number };
+
+type K8sContainer = {
+  name?: string;
+  image?: string;
+  resources?: { requests?: unknown; limits?: unknown };
+  securityContext?: K8sSecurityContext;
+  ports?: K8sContainerPort[];
+  imagePullPolicy?: string;
+  startupProbe?: unknown;
+  readinessProbe?: unknown;
+  livenessProbe?: unknown;
+};
+
+type K8sVolume = { name?: string; hostPath?: { path?: string } };
+
+type K8sPodSpec = {
+  containers?: K8sContainer[];
+  initContainers?: K8sContainer[];
+  ephemeralContainers?: K8sContainer[];
+  hostNetwork?: boolean;
+  hostPID?: boolean;
+  hostIPC?: boolean;
+  volumes?: K8sVolume[];
+  serviceAccountName?: string;
+  serviceAccount?: string;
+  automountServiceAccountToken?: boolean;
+  securityContext?: K8sSecurityContext;
+  // Not a real Kubernetes field (a Pod's `spec` has no nested `metadata`),
+  // but getWorkloadLabels defensively checked for it before this file used
+  // `any`, so this stays to preserve that exact fallback without changing
+  // behavior.
+  metadata?: K8sMetadata;
+};
+
+type K8sIngressBackend = { service?: { name?: string } };
+type K8sIngressPath = { path?: string; backend?: K8sIngressBackend };
+type K8sIngressRule = {
+  host?: string;
+  http?: { paths?: K8sIngressPath[]; defaultBackend?: K8sIngressBackend };
+};
+type K8sIngressTls = { hosts?: string[] };
+
+type K8sSubject = { kind?: string; name?: string; namespace?: string };
+
+type K8sRbacRule = { apiGroups?: unknown[]; resources?: unknown[]; verbs?: unknown[] };
+
+// A parsed Kubernetes manifest document has no statically known shape until
+// it is dispatched by `kind` below. This type is a deliberately permissive
+// superset of every field this analyzer reads across every supported
+// resource kind (all optional) rather than `any`, so property access stays
+// type-checked while still tolerating documents that omit a given field -
+// exactly the same tolerance the original `any`-typed optional chaining had.
+type K8sDocument = {
+  apiVersion?: string;
+  kind?: string;
+  metadata?: K8sMetadata;
+  spec?: K8sPodSpec & {
+    replicas?: number;
+    parallelism?: number;
+    template?: { metadata?: K8sMetadata; spec?: K8sPodSpec };
+    jobTemplate?: {
+      spec?: {
+        parallelism?: number;
+        template?: { metadata?: K8sMetadata; spec?: K8sPodSpec };
+      };
+    };
+    selector?: Record<string, unknown>;
+    podSelector?: Record<string, unknown>;
+    type?: string;
+    rules?: K8sIngressRule[];
+    tls?: K8sIngressTls[];
+    defaultBackend?: K8sIngressBackend;
+    ingress?: unknown[];
+    egress?: unknown[];
+    minAvailable?: unknown;
+    maxUnavailable?: unknown;
+  };
+  rules?: K8sRbacRule[];
+  subjects?: K8sSubject[];
+};
+
 const exampleYaml = `apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -42,7 +140,7 @@ spec:
           ports:
             - containerPort: 80`;
 
-function getEffectiveSecurityContext(container: any, podSpec: any) {
+function getEffectiveSecurityContext(container: K8sContainer | undefined, podSpec: K8sPodSpec | undefined) {
   return {
     ...(podSpec?.securityContext || {}),
     ...(container?.securityContext || {}),
@@ -91,8 +189,8 @@ type ContainerKind = "container" | "initContainer" | "ephemeralContainer";
 // skipped for that container kind rather than reporting on fields that
 // can never legitimately be present.
 function analyzeContainerChecks(
-  container: any,
-  podSpec: any,
+  container: K8sContainer | undefined,
+  podSpec: K8sPodSpec | undefined,
   index: number,
   containerKind: ContainerKind
 ): Check[] {
@@ -260,12 +358,12 @@ function analyzeContainerChecks(
   const capabilities = securityContext?.capabilities || {};
   const addedCapabilities = Array.isArray(capabilities.add)
     ? capabilities.add
-        .map((cap: any) => String(cap).trim())
+        .map((cap) => String(cap).trim())
         .filter(Boolean)
     : [];
   const droppedCapabilities = Array.isArray(capabilities.drop)
     ? capabilities.drop
-        .map((cap: any) => String(cap).trim())
+        .map((cap) => String(cap).trim())
         .filter(Boolean)
     : [];
 
@@ -342,8 +440,8 @@ function analyzeContainerChecks(
 
   if (supportsResourcesAndProbes) {
     const hostPortValues = (container?.ports || [])
-      .filter((port: any) => typeof port?.hostPort === "number")
-      .map((port: any) => `${port.containerPort || "unknown"}:${port.hostPort}`);
+      .filter((port) => typeof port?.hostPort === "number")
+      .map((port) => `${port.containerPort || "unknown"}:${port.hostPort}`);
 
     if (hostPortValues.length > 0) {
       checks.push({
@@ -443,22 +541,22 @@ function analyzeContainerChecks(
 // ephemeralContainers. Missing/empty arrays default to [] and simply
 // contribute nothing, so a pod spec with only `containers` produces
 // identical output to before this function existed.
-function analyzeAllContainers(podSpec: any): Check[] {
+function analyzeAllContainers(podSpec: K8sPodSpec | null | undefined): Check[] {
   const checks: Check[] = [];
   const containers = podSpec?.containers || [];
 
-  containers.forEach((container: any, index: number) => {
-    checks.push(...analyzeContainerChecks(container, podSpec, index, "container"));
+  containers.forEach((container, index) => {
+    checks.push(...analyzeContainerChecks(container, podSpec ?? undefined, index, "container"));
   });
 
   const initContainers = podSpec?.initContainers || [];
-  initContainers.forEach((container: any, index: number) => {
-    checks.push(...analyzeContainerChecks(container, podSpec, index, "initContainer"));
+  initContainers.forEach((container, index) => {
+    checks.push(...analyzeContainerChecks(container, podSpec ?? undefined, index, "initContainer"));
   });
 
   const ephemeralContainers = podSpec?.ephemeralContainers || [];
-  ephemeralContainers.forEach((container: any, index: number) => {
-    checks.push(...analyzeContainerChecks(container, podSpec, index, "ephemeralContainer"));
+  ephemeralContainers.forEach((container, index) => {
+    checks.push(...analyzeContainerChecks(container, podSpec ?? undefined, index, "ephemeralContainer"));
   });
 
   return checks;
@@ -490,7 +588,7 @@ function analyzeReplicaAvailability(kind: string, replicas: unknown): Check {
 // pod auto-mounts a ServiceAccount token (defaults to true when unset) and
 // whether it uses a dedicated ServiceAccount rather than the implicit
 // "default" one. Shared by analyzeDeployment and analyzeWorkload.
-function analyzeServiceAccountPosture(podSpec: any): Check[] {
+function analyzeServiceAccountPosture(podSpec: K8sPodSpec | null | undefined): Check[] {
   const checks: Check[] = [];
 
   if (podSpec?.automountServiceAccountToken === false) {
@@ -531,7 +629,7 @@ function analyzeServiceAccountPosture(podSpec: any): Check[] {
   return checks;
 }
 
-function analyzeDeployment(document: any): Check[] {
+function analyzeDeployment(document: K8sDocument): Check[] {
   const checks: Check[] = [];
 
   const spec = document?.spec;
@@ -606,10 +704,11 @@ function analyzeDeployment(document: any): Check[] {
     });
   }
 
-  if (podSpec?.volumes?.some((volume: any) => volume?.hostPath)) {
-    const hostPathVolumes = podSpec.volumes.filter((volume: any) => volume?.hostPath);
+  const deploymentVolumes = podSpec?.volumes || [];
+  if (deploymentVolumes.some((volume) => volume?.hostPath)) {
+    const hostPathVolumes = deploymentVolumes.filter((volume) => volume?.hostPath);
     const hostPathDetail = hostPathVolumes
-      .map((volume: any) => `${volume.name || "unnamed"}: ${volume.hostPath.path || "unknown path"}`)
+      .map((volume) => `${volume.name || "unnamed"}: ${volume.hostPath?.path || "unknown path"}`)
       .join(", ");
 
     checks.push({
@@ -647,7 +746,7 @@ function analyzeDeployment(document: any): Check[] {
   return checks;
 }
 
-function getPodSpec(document: any): any | null {
+function getPodSpec(document: K8sDocument | null | undefined): K8sPodSpec | null {
   // Extract pod spec from common workload types
   if (!document || typeof document !== "object") return null;
 
@@ -681,7 +780,7 @@ function getPodSpec(document: any): any | null {
   return null;
 }
 
-function analyzeWorkload(document: any): Check[] {
+function analyzeWorkload(document: K8sDocument): Check[] {
   const checks: Check[] = [];
 
   // StatefulSet has the same meaningful spec.replicas concept as
@@ -759,10 +858,11 @@ function analyzeWorkload(document: any): Check[] {
     });
   }
 
-  if (podSpec?.volumes?.some((volume: any) => volume?.hostPath)) {
-    const hostPathVolumes = podSpec.volumes.filter((volume: any) => volume?.hostPath);
+  const workloadVolumes = podSpec?.volumes || [];
+  if (workloadVolumes.some((volume) => volume?.hostPath)) {
+    const hostPathVolumes = workloadVolumes.filter((volume) => volume?.hostPath);
     const hostPathDetail = hostPathVolumes
-      .map((volume: any) => `${volume.name || "unnamed"}: ${volume.hostPath.path || "unknown path"}`)
+      .map((volume) => `${volume.name || "unnamed"}: ${volume.hostPath?.path || "unknown path"}`)
       .join(", ");
 
     checks.push({
@@ -843,15 +943,15 @@ const DEPRECATED_KUBERNETES_APIS = [
   },
 ];
 
-function getResourceName(document: any): string {
+function getResourceName(document: K8sDocument | null | undefined): string {
   return document?.metadata?.name || "<unnamed>";
 }
 
-function getResourceNamespace(document: any): string {
+function getResourceNamespace(document: K8sDocument | null | undefined): string {
   return document?.metadata?.namespace || "<none>";
 }
 
-function getWorkloadLabels(workload: any): Record<string, string> {
+function getWorkloadLabels(workload: K8sDocument | null | undefined): Record<string, string> {
   if (!workload || typeof workload !== "object") return {};
 
   if (workload.kind === "Pod") {
@@ -869,7 +969,7 @@ function getWorkloadLabels(workload: any): Record<string, string> {
   return workload?.spec?.template?.metadata?.labels || workload?.metadata?.labels || {};
 }
 
-function getWorkloadReplicas(workload: any): number {
+function getWorkloadReplicas(workload: K8sDocument | null | undefined): number {
   if (!workload || typeof workload !== "object") return 0;
 
   if (workload.kind === "Deployment" || workload.kind === "StatefulSet" || workload.kind === "ReplicaSet" || workload.kind === "DaemonSet") {
@@ -891,14 +991,14 @@ function getWorkloadReplicas(workload: any): number {
   return 0;
 }
 
-function hasSelectorContent(selector: any): boolean {
+function hasSelectorContent(selector: Record<string, unknown> | null | undefined): boolean {
   if (!selector || typeof selector !== "object") return false;
 
   if (Object.keys(selector).length === 0) return false;
 
   const keys = Object.keys(selector);
   if (keys.includes("matchLabels") || keys.includes("matchExpressions")) {
-    const matchLabels = selector.matchLabels || {};
+    const matchLabels = (selector.matchLabels as Record<string, unknown> | undefined) || {};
     const matchExpressions = Array.isArray(selector.matchExpressions) ? selector.matchExpressions : [];
     return Object.keys(matchLabels).length > 0 || matchExpressions.length > 0;
   }
@@ -906,11 +1006,15 @@ function hasSelectorContent(selector: any): boolean {
   return true;
 }
 
-function selectorMatches(selector: any, labels: Record<string, string> | undefined): boolean {
+function selectorMatches(
+  selector: Record<string, unknown> | null | undefined,
+  labels: Record<string, string> | undefined
+): boolean {
   if (!selector || typeof selector !== "object") return false;
 
-  const selectorObject = selector.matchLabels || selector.matchExpressions ? selector : { matchLabels: selector };
-  const matchLabels = selectorObject.matchLabels || {};
+  const selectorObject: Record<string, unknown> =
+    selector.matchLabels || selector.matchExpressions ? selector : { matchLabels: selector };
+  const matchLabels = (selectorObject.matchLabels as Record<string, unknown> | undefined) || {};
   const matchExpressions = Array.isArray(selectorObject.matchExpressions) ? selectorObject.matchExpressions : [];
 
   if (Object.keys(matchLabels).length === 0 && matchExpressions.length === 0) {
@@ -932,10 +1036,11 @@ function selectorMatches(selector: any, labels: Record<string, string> | undefin
       return false;
     }
 
-    const key = String(expression.key || "");
-    const operator = String(expression.operator || "");
+    const expressionObject = expression as Record<string, unknown>;
+    const key = String(expressionObject.key || "");
+    const operator = String(expressionObject.operator || "");
     const actualValue = labels[key];
-    const values = Array.isArray(expression.values) ? expression.values.map((item: any) => String(item)) : [];
+    const values = Array.isArray(expressionObject.values) ? expressionObject.values.map((item) => String(item)) : [];
 
     switch (operator) {
       case "In":
@@ -964,18 +1069,18 @@ function selectorMatches(selector: any, labels: Record<string, string> | undefin
   return true;
 }
 
-function collectManifest(resources: any[]) {
+function collectManifest(resources: K8sDocument[]) {
   const manifest = {
-    resources: [] as any[],
-    workloads: [] as any[],
-    services: [] as any[],
-    ingresses: [] as any[],
-    networkPolicies: [] as any[],
-    podDisruptionBudgets: [] as any[],
-    roles: [] as any[],
-    clusterRoles: [] as any[],
-    roleBindings: [] as any[],
-    clusterRoleBindings: [] as any[],
+    resources: [] as K8sDocument[],
+    workloads: [] as K8sDocument[],
+    services: [] as K8sDocument[],
+    ingresses: [] as K8sDocument[],
+    networkPolicies: [] as K8sDocument[],
+    podDisruptionBudgets: [] as K8sDocument[],
+    roles: [] as K8sDocument[],
+    clusterRoles: [] as K8sDocument[],
+    roleBindings: [] as K8sDocument[],
+    clusterRoleBindings: [] as K8sDocument[],
   };
 
   resources.forEach((document) => {
@@ -1024,7 +1129,7 @@ function collectManifest(resources: any[]) {
   return manifest;
 }
 
-function analyzeService(document: any, manifest: ReturnType<typeof collectManifest>): Check[] {
+function analyzeService(document: K8sDocument, manifest: ReturnType<typeof collectManifest>): Check[] {
   const checks: Check[] = [];
   const serviceType = document?.spec?.type || "ClusterIP";
 
@@ -1104,19 +1209,21 @@ function analyzeService(document: any, manifest: ReturnType<typeof collectManife
   return checks;
 }
 
-function analyzeIngress(document: any, manifest: ReturnType<typeof collectManifest>): Check[] {
+function analyzeIngress(document: K8sDocument, manifest: ReturnType<typeof collectManifest>): Check[] {
   const checks: Check[] = [];
   const hostNames = [] as string[];
   const paths = [] as string[];
 
-  const rules = Array.isArray(document?.spec?.rules) ? document.spec.rules : [];
+  const rulesSource = document?.spec?.rules;
+  const rules = Array.isArray(rulesSource) ? rulesSource : [];
 
-  rules.forEach((rule: any) => {
+  rules.forEach((rule) => {
     if (rule?.host) hostNames.push(rule.host);
 
-    const rulePaths = Array.isArray(rule?.http?.paths)
-      ? rule.http.paths
-          .map((pathObj: any) => pathObj?.path || "/")
+    const rulePathsSource = rule.http?.paths;
+    const rulePaths = Array.isArray(rulePathsSource)
+      ? rulePathsSource
+          .map((pathObj) => pathObj?.path || "/")
           .filter(Boolean)
       : [];
 
@@ -1154,8 +1261,9 @@ function analyzeIngress(document: any, manifest: ReturnType<typeof collectManife
     });
   }
 
-  const tlsHosts = Array.isArray(document?.spec?.tls)
-    ? document.spec.tls.flatMap((tlsEntry: any) => Array.isArray(tlsEntry?.hosts) ? tlsEntry.hosts : [])
+  const tlsSource = document?.spec?.tls;
+  const tlsHosts = Array.isArray(tlsSource)
+    ? tlsSource.flatMap((tlsEntry) => Array.isArray(tlsEntry?.hosts) ? tlsEntry.hosts : [])
     : [];
 
   if (hostNames.length > 0) {
@@ -1180,9 +1288,10 @@ function analyzeIngress(document: any, manifest: ReturnType<typeof collectManife
 
   const backendRefs = [] as string[];
 
-  rules.forEach((rule: any) => {
-    if (Array.isArray(rule?.http?.paths)) {
-      rule.http.paths.forEach((pathObj: any) => {
+  rules.forEach((rule) => {
+    const backendPathsSource = rule.http?.paths;
+    if (Array.isArray(backendPathsSource)) {
+      backendPathsSource.forEach((pathObj) => {
         const serviceName = pathObj?.backend?.service?.name;
         if (serviceName) backendRefs.push(serviceName);
       });
@@ -1220,7 +1329,7 @@ function analyzeIngress(document: any, manifest: ReturnType<typeof collectManife
   return checks;
 }
 
-function analyzeNetworkPolicy(document: any, manifest: ReturnType<typeof collectManifest>): Check[] {
+function analyzeNetworkPolicy(document: K8sDocument, manifest: ReturnType<typeof collectManifest>): Check[] {
   const checks: Check[] = [];
 
   checks.push({
@@ -1246,8 +1355,10 @@ function analyzeNetworkPolicy(document: any, manifest: ReturnType<typeof collect
     });
   }
 
-  const ingressRules = Array.isArray(document?.spec?.ingress) ? document.spec.ingress : [];
-  const egressRules = Array.isArray(document?.spec?.egress) ? document.spec.egress : [];
+  const ingressSource = document?.spec?.ingress;
+  const ingressRules = Array.isArray(ingressSource) ? ingressSource : [];
+  const egressSource = document?.spec?.egress;
+  const egressRules = Array.isArray(egressSource) ? egressSource : [];
 
   if (ingressRules.length > 0 || egressRules.length > 0) {
     checks.push({
@@ -1300,7 +1411,7 @@ function analyzeNetworkPolicy(document: any, manifest: ReturnType<typeof collect
   return checks;
 }
 
-function analyzePdb(document: any, manifest: ReturnType<typeof collectManifest>): Check[] {
+function analyzePdb(document: K8sDocument, manifest: ReturnType<typeof collectManifest>): Check[] {
   const checks: Check[] = [];
   const minAvailable = document?.spec?.minAvailable;
   const maxUnavailable = document?.spec?.maxUnavailable;
@@ -1374,7 +1485,7 @@ function analyzePdb(document: any, manifest: ReturnType<typeof collectManifest>)
   return checks;
 }
 
-function analyzeRbac(document: any): Check[] {
+function analyzeRbac(document: K8sDocument): Check[] {
   const checks: Check[] = [];
   const kind = document?.kind;
   const name = getResourceName(document);
@@ -1388,7 +1499,8 @@ function analyzeRbac(document: any): Check[] {
   const isBindingKind = kind === "RoleBinding" || kind === "ClusterRoleBinding";
 
   if (!isBindingKind) {
-    const rules = Array.isArray(document?.rules) ? document.rules : [];
+    const rulesSource = document.rules;
+    const rules = Array.isArray(rulesSource) ? rulesSource : [];
 
     if (rules.length === 0) {
       checks.push({
@@ -1400,7 +1512,7 @@ function analyzeRbac(document: any): Check[] {
       return checks;
     }
 
-    rules.forEach((rule: any, index: number) => {
+    rules.forEach((rule, index) => {
       const apiGroups = Array.isArray(rule?.apiGroups) ? rule.apiGroups.map(String) : [];
       const resources = Array.isArray(rule?.resources) ? rule.resources.map(String) : [];
       const verbs = Array.isArray(rule?.verbs) ? rule.verbs.map(String) : [];
@@ -1436,7 +1548,8 @@ function analyzeRbac(document: any): Check[] {
   }
 
   if (isBindingKind) {
-    const subjects = Array.isArray(document?.subjects) ? document.subjects : [];
+    const subjectsSource = document.subjects;
+    const subjects = Array.isArray(subjectsSource) ? subjectsSource : [];
 
     if (subjects.length === 0) {
       checks.push({
@@ -1447,7 +1560,7 @@ function analyzeRbac(document: any): Check[] {
       });
     }
 
-    subjects.forEach((subject: any) => {
+    subjects.forEach((subject) => {
       if (subject?.kind === "ServiceAccount") {
         const subjectNamespace = subject?.namespace || namespace;
         const bindingScope = kind === "ClusterRoleBinding" ? "cluster-wide" : "namespace-scoped";
@@ -1466,7 +1579,7 @@ function analyzeRbac(document: any): Check[] {
   return checks;
 }
 
-function analyzeDeprecatedApi(document: any): Check[] {
+function analyzeDeprecatedApi(document: K8sDocument): Check[] {
   const checks: Check[] = [];
   const apiVersion = document?.apiVersion || "unknown";
   const kind = document?.kind || "unknown";
@@ -1493,9 +1606,15 @@ function analyzeYaml(input: string): {
   error?: string;
 } {
   try {
-    const docs: any[] = [];
+    const docs: K8sDocument[] = [];
+    // js-yaml's loadAll callback receives a parsed document of genuinely
+    // unknown shape (it could be an object, array, string, or scalar) -
+    // this is the single boundary where untyped external YAML input enters
+    // this file's typed model, and every downstream function already
+    // defensively guards with typeof/Array.isArray checks before trusting
+    // any field, exactly as it did when this was typed `any`.
     yaml.loadAll(input, (doc) => {
-      if (doc !== undefined) docs.push(doc);
+      if (doc !== undefined) docs.push(doc as K8sDocument);
     });
 
     if (docs.length === 0) {
@@ -1694,7 +1813,7 @@ function analyzeYaml(input: string): {
       "CronJob",
     ].includes(resource.kind));
 
-    const workloadMatches = new Map<string, any[]>();
+    const workloadMatches = new Map<string, K8sDocument[]>();
     const networkPolicies = manifest.networkPolicies || [];
 
     workloadResources.forEach((workload) => {
@@ -1803,11 +1922,13 @@ function analyzeYaml(input: string): {
       const ingressDoc = manifest.ingresses.find((doc) => getResourceName(doc) === resource.name && getResourceNamespace(doc) === resource.namespace);
       if (!ingressDoc) return;
 
-      const rules = Array.isArray(ingressDoc?.spec?.rules) ? ingressDoc.spec.rules : [];
+      const ingressRulesSource = ingressDoc?.spec?.rules;
+      const rules = Array.isArray(ingressRulesSource) ? ingressRulesSource : [];
       const backendRefs = [] as string[];
-      rules.forEach((rule: any) => {
-        if (Array.isArray(rule?.http?.paths)) {
-          rule.http.paths.forEach((pathObj: any) => {
+      rules.forEach((rule) => {
+        const ingressRulePathsSource = rule.http?.paths;
+        if (Array.isArray(ingressRulePathsSource)) {
+          ingressRulePathsSource.forEach((pathObj) => {
             if (pathObj?.backend?.service?.name) backendRefs.push(pathObj.backend.service.name);
           });
         }

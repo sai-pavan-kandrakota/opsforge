@@ -710,7 +710,7 @@ export default function AiSreAssistantPage() {
   const [analysis, setAnalysis] = useState<IncidentAnalysis>(() => {
     try {
       return analyzeIncident(exampleInputs.crashLoop);
-    } catch (_error) {
+    } catch {
       return emptyInputAnalysis();
     }
   });
@@ -726,7 +726,7 @@ export default function AiSreAssistantPage() {
       const result = analyzeIncident(input);
       setError("");
       setAnalysis(result);
-    } catch (_error) {
+    } catch {
       setError(
         "Analysis failed for this input. This does not mean the incident is resolved — the analyzer could not process the pasted text. The previous result below is unchanged; try shortening or simplifying the input and analyze again.",
       );
@@ -746,7 +746,7 @@ export default function AiSreAssistantPage() {
       const result = analyzeIncident(exampleInputs[key]);
       setError("");
       setAnalysis(result);
-    } catch (_error) {
+    } catch {
       setError("Could not generate the example analysis. Please try again.");
     }
   };

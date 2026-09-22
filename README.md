@@ -1,36 +1,110 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# OpsForge
 
-## Getting Started
+OpsForge is a browser-based toolkit for DevOps and SRE work. It provides a
+set of practical, self-contained utilities and static analyzers for
+Kubernetes, Terraform, Dockerfiles, GitHub Actions, Helm, AWS IAM, and
+day-to-day CI/CD and networking tasks — built with Next.js, React, and
+TypeScript.
 
-First, run the development server:
+## What it provides
+
+OpsForge provides browser-based utilities and analyzers for DevOps, Cloud,
+Kubernetes, Terraform, CI/CD, containers, AWS, and SRE workflows. Each tool
+is a focused, single-purpose page: paste input (or fill in a form), get
+results immediately, with no sign-up and no server round trip for the
+analysis itself.
+
+## Tools
+
+| Tool | Route |
+|---|---|
+| CIDR Calculator | `/tools/cidr-calculator` |
+| JSON Formatter | `/tools/json-formatter` |
+| Cron Generator | `/tools/cron-generator` |
+| YAML Validator | `/tools/yaml-validator` |
+| Kubernetes Generator | `/tools/kubernetes-generator` |
+| Kubernetes Manifest Analyzer | `/tools/kubernetes-analyzer` |
+| Dockerfile Analyzer | `/tools/dockerfile-analyzer` |
+| GitHub Actions Analyzer | `/tools/github-actions-analyzer` |
+| Terraform Analyzer | `/tools/terraform-analyzer` |
+| Helm Analyzer | `/tools/helm-analyzer` |
+| AWS IAM Policy Analyzer | `/tools/aws-iam-analyzer` |
+| AI SRE Assistant | `/tools/ai-sre-assistant` |
+
+## Key characteristics
+
+- All 12 tools run their analysis/generation logic in the browser — pasted
+  YAML, Terraform, Dockerfiles, GitHub Actions workflows, and IAM policies
+  are parsed and checked client-side.
+- No account or sign-in is currently required to use any tool.
+- No tool sends the content you paste or type to an external API — there is
+  no `fetch`, `XMLHttpRequest`, or third-party analytics call anywhere in
+  the tool logic.
+- Results (findings, generated YAML, formatted output) are produced locally
+  by the application in your browser session.
+
+## Getting started
 
 ```bash
+npm install
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Then open [http://localhost:3000](http://localhost:3000).
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Production build
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+```bash
+npm run build
+npm run start
+```
 
-## Learn More
+## Validation
 
-To learn more about Next.js, take a look at the following resources:
+```bash
+npx tsc --noEmit
+npm run lint
+npm run build
+```
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Architecture
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+- **Next.js (App Router)** + **React** + **TypeScript** + **Tailwind CSS**.
+- Each tool lives under `app/tools/<tool-name>/` as a `page.tsx` +
+  `ClientComponent.tsx` pair: `page.tsx` is a server component that sets
+  page-specific metadata and renders the shared layout; `ClientComponent.tsx`
+  is a client component holding the tool's interactive state and logic.
+- Shared layout pieces (`SiteHeader`, `SiteFooter`) live in
+  `app/components/` and are reused across the homepage, every tool page, and
+  the informational pages (About, Contact, Privacy, Terms).
 
-## Deploy on Vercel
+## Project structure
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+```
+app/
+  components/
+    SiteHeader.tsx
+    SiteFooter.tsx
+  tools/
+    <tool-name>/
+      page.tsx            # server component: metadata + layout
+      ClientComponent.tsx  # client component: interactive tool logic
+  about/
+  contact/
+  privacy/
+  terms/
+  page.tsx                # homepage: searchable tool catalog
+  layout.tsx
+  sitemap.ts
+  robots.ts
+```
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+## Privacy
+
+Most OpsForge tools are static analyzers or generators that process the
+input you provide entirely within your browser's JavaScript environment —
+pasted configuration is not intentionally transmitted to a backend for
+analysis. Standard network requests still occur to load the site itself
+(fonts, scripts, pages), and hosting infrastructure may keep standard
+request logs. See the [Privacy Policy](/privacy) page in the app for the
+current, authoritative description of data handling.

@@ -13,10 +13,6 @@ type Finding = {
   recommendation?: string;
 };
 
-type ParseResult =
-  | { ok: true; document: Record<string, unknown> }
-  | { ok: false; error: string };
-
 const exampleHelm = `apiVersion: v2
 name: opsforge-web
 version: 0.1.0
@@ -334,11 +330,6 @@ function isSemanticVersion(value: string): boolean {
   return /^v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(value);
 }
 
-function containsSecretLikeText(text: string): boolean {
-  const lower = text.toLowerCase();
-  return /(password|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|client[_-]?secret)/.test(lower);
-}
-
 // Returns `rawText` with `#` line comments removed, treating single- and
 // double-quoted string content as opaque so a `#` inside a quoted value is
 // never mistaken for a comment start. Scoped only for use by the
@@ -562,7 +553,6 @@ function analyzeHelmChart(rawText: string): Finding[] {
     });
   }
 
-  const lowerText = rawText.toLowerCase();
   const deploymentRegex = /kind:\s*deployment|kind:\s*statefulset|kind:\s*daemonset/i;
   const hasDeployment = deploymentRegex.test(rawText);
 

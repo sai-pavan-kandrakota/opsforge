@@ -35,7 +35,7 @@ export default function PrivacyPage() {
           <h2 className="text-lg font-semibold text-white">Local processing</h2>
           <p className="mt-3 text-zinc-400">
             Many OpsForge tools perform static analysis locally in your browser. When you paste
-            configuration into a tool, the analysis runs on your device in the browser's JavaScript
+            configuration into a tool, the analysis runs on your device in the browser&apos;s JavaScript
             environment and does not intentionally transmit your pasted content to a remote backend.
           </p>
           <p className="mt-3 text-zinc-400">
@@ -77,7 +77,7 @@ export default function PrivacyPage() {
         <section className="mt-6 rounded-2xl border border-zinc-800 bg-zinc-900/80 p-6">
           <h2 className="text-lg font-semibold text-white">Policy updates</h2>
           <p className="mt-3 text-zinc-400">
-            This policy may be updated as the product evolves. The "Last updated" date at the top
+            This policy may be updated as the product evolves. The &quot;Last updated&quot; date at the top
             will indicate the most recent change.
           </p>
         </section>

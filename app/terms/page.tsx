@@ -47,7 +47,7 @@ export default function TermsPage() {
 
         <section className="mt-6 rounded-2xl border border-zinc-800 bg-zinc-900/80 p-6">
           <h2 className="text-lg font-semibold text-white">No warranties</h2>
-          <p className="mt-3 text-zinc-400">All tools are provided "as is" without warranties of any kind.</p>
+          <p className="mt-3 text-zinc-400">All tools are provided &quot;as is&quot; without warranties of any kind.</p>
         </section>
 
         <section className="mt-6 rounded-2xl border border-zinc-800 bg-zinc-900/80 p-6">
@@ -61,7 +61,7 @@ export default function TermsPage() {
 
         <section className="mt-6 rounded-2xl border border-zinc-800 bg-zinc-900/80 p-6">
           <h2 className="text-lg font-semibold text-white">Acceptable use</h2>
-          <p className="mt-3 text-zinc-400">Do not use the site to submit illegal content or to harm others' systems or data.</p>
+          <p className="mt-3 text-zinc-400">Do not use the site to submit illegal content or to harm others&apos; systems or data.</p>
         </section>
 
         <div className="mt-8 text-sm text-zinc-500">

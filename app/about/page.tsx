@@ -36,7 +36,7 @@ export default function AboutPage() {
             <p className="mt-3 text-zinc-400">
               While the tools are useful for day-to-day engineering, OpsForge is not a replacement for
               enterprise security scanners, cloud provider tools, or formal audits. Use these tools
-              as a practical first pass and always validate results with your organization's
+              as a practical first pass and always validate results with your organization&apos;s
               security processes.
             </p>
           </section>

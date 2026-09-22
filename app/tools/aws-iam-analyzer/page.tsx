@@ -36,8 +36,8 @@ export default function Page() {
           <h2 className="mb-4 text-sm font-semibold uppercase tracking-[0.2em] text-zinc-500">What it checks</h2>
           <ul className="grid gap-2 text-sm text-zinc-400 md:grid-cols-2">
             <li>• IAM policy JSON structure and versioning</li>
-            <li>• Action = "*" and wildcard action patterns</li>
-            <li>• Resource = "*" and wildcard resource use</li>
+            <li>• Action = &quot;*&quot; and wildcard action patterns</li>
+            <li>• Resource = &quot;*&quot; and wildcard resource use</li>
             <li>• broad permissions that merit review</li>
             <li>• least-privilege concerns in statements</li>
             <li>• explicit policy risk signals from supplied JSON</li>

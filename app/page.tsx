@@ -2,6 +2,7 @@
 
 import { useMemo, useState } from "react";
 import type { FormEvent } from "react";
+import Link from "next/link";
 
 import SiteFooter from "@/app/components/SiteFooter";
 
@@ -343,7 +344,7 @@ export default function Home() {
 
                 <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
                   {categoryTools.map((tool) => (
-                    <a
+                    <Link
                       key={tool.name}
                       href={tool.href}
                       className="group block rounded-2xl border border-zinc-800 bg-zinc-900/70 p-5 transition duration-200 hover:-translate-y-1 hover:border-zinc-600 hover:bg-zinc-900"
@@ -359,7 +360,7 @@ export default function Home() {
 
                       <h4 className="text-xl font-semibold text-white">{tool.name}</h4>
                       <p className="mt-3 text-sm leading-6 text-zinc-400">{tool.description}</p>
-                    </a>
+                    </Link>
                   ))}
                 </div>
               </div>

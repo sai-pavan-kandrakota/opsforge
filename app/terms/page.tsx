@@ -1,7 +1,13 @@
-"use client";
+import type { Metadata } from "next";
 
 import SiteFooter from "@/app/components/SiteFooter";
 import SiteHeader from "@/app/components/SiteHeader";
+
+export const metadata: Metadata = {
+  title: "Terms of Service - OpsForge",
+  description:
+    "Terms of use for OpsForge, including the no-professional-advice disclaimer, user responsibility for validating output, and limitation of liability.",
+};
 
 export default function TermsPage() {
   return (

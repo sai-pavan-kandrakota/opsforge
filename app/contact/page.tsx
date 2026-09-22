@@ -1,7 +1,13 @@
-"use client";
+import type { Metadata } from "next";
 
 import SiteFooter from "@/app/components/SiteFooter";
 import SiteHeader from "@/app/components/SiteHeader";
+
+export const metadata: Metadata = {
+  title: "Contact OpsForge",
+  description:
+    "Reach OpsForge with bug reports, tool suggestions, feedback, and security disclosures.",
+};
 
 export default function ContactPage() {
   return (

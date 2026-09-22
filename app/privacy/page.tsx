@@ -1,9 +1,15 @@
-"use client";
+import type { Metadata } from "next";
 
 import SiteFooter from "@/app/components/SiteFooter";
 import SiteHeader from "@/app/components/SiteHeader";
 
 const today = new Date().toISOString().split("T")[0];
+
+export const metadata: Metadata = {
+  title: "Privacy Policy - OpsForge",
+  description:
+    "How OpsForge handles data: most tools process pasted configuration locally in your browser, no user accounts are required, and this policy explains what may be collected.",
+};
 
 export default function PrivacyPage() {
   return (

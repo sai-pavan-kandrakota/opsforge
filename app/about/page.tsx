@@ -1,7 +1,13 @@
-"use client";
+import type { Metadata } from "next";
 
 import SiteFooter from "@/app/components/SiteFooter";
 import SiteHeader from "@/app/components/SiteHeader";
+
+export const metadata: Metadata = {
+  title: "About OpsForge - DevOps & SRE Tools",
+  description:
+    "OpsForge is a browser-based toolkit for DevOps, Cloud, Kubernetes, Terraform, CI/CD, containers, AWS, and SRE engineers, providing practical utilities that reduce friction without unnecessary complexity.",
+};
 
 export default function AboutPage() {
   return (

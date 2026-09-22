@@ -132,6 +132,37 @@ function hasAnyActionField(statement: Statement): boolean {
   return toStringArray(statement.Action).length > 0 || toStringArray(statement.NotAction).length > 0;
 }
 
+type ResourceSpec = {
+  mode: "include" | "exclude" | "both" | "none";
+  resources: string[];
+};
+
+// Resource and NotResource are opposites, mirroring Action/NotAction above:
+// Resource lists the exact ARNs a statement applies to, while NotResource
+// lists the ones it EXCLUDES — so under Allow it applies to every other
+// resource instead. Treating NotResource as an ordinary scoped Resource list
+// would make `Allow + NotResource: "arn:...:one-bucket/*"` look like a
+// narrow single-resource grant when it actually grants access to every
+// other resource in the account.
+function getResourceSpec(statement: Statement): ResourceSpec {
+  const included = toStringArray(statement.Resource);
+  const excluded = toStringArray(statement.NotResource);
+
+  if (included.length > 0 && excluded.length > 0) {
+    // Not valid AWS policy grammar — a statement should use one or the
+    // other. Left out of the wildcard-resource risk logic below rather
+    // than guessed at, mirroring the Action/NotAction "both" handling.
+    return { mode: "both", resources: included };
+  }
+  if (included.length > 0) {
+    return { mode: "include", resources: included };
+  }
+  if (excluded.length > 0) {
+    return { mode: "exclude", resources: excluded };
+  }
+  return { mode: "none", resources: [] };
+}
+
 function getResourceList(statement: Statement): string[] {
   return toStringArray(statement.Resource);
 }
@@ -256,6 +287,21 @@ function analyzePolicy(policyText: string): Finding[] {
     return findings;
   }
 
+  // getStatements() silently filters out non-object entries when Statement
+  // is an array, so a corrupted entry (a stray string, null, etc.) would
+  // otherwise be dropped from analysis with no indication anything was
+  // excluded.
+  const rawStatement = parsed.Statement;
+  const malformedStatementCount = Array.isArray(rawStatement) ? rawStatement.length - statements.length : 0;
+  if (malformedStatementCount > 0) {
+    findings.push({
+      title: "Malformed statement entries",
+      severity: "WARNING",
+      description: `${malformedStatementCount} entr${malformedStatementCount === 1 ? "y" : "ies"} in the Statement array were not valid statement objects and were excluded from analysis.`,
+      recommendation: "Ensure every entry in the Statement array is a JSON object with Effect, Action, and Resource fields.",
+    });
+  }
+
   const missingEffect: string[] = [];
   const missingAction: string[] = [];
   const missingResource: string[] = [];
@@ -337,12 +383,13 @@ function analyzePolicy(policyText: string): Finding[] {
     });
   }
 
-  const principalClaims: string[] = [];
+  const principalClaims = newBucket();
   const denyStatements: string[] = [];
   const conditionStatements: string[] = [];
   const specificStrongPasses: string[] = [];
   const ambiguousActionNotAction: string[] = [];
   const notActionAllowGrants: { sid: string; excludedActions: string[]; resourceHasWildcard: boolean }[] = [];
+  const notResourceAllowGrants: { sid: string; excludedResources: string[]; actionHasWildcard: boolean }[] = [];
 
   const wildcardAction = newBucket();
   const wildcardResource = newBucket();
@@ -366,11 +413,19 @@ function analyzePolicy(policyText: string): Finding[] {
     const effect = getEffectKind(statement);
     const actionSpec = getActionSpec(statement);
     const resources = getResourceList(statement);
-    const resourceHasWildcard = resources.includes("*");
+    const resourceSpec = getResourceSpec(statement);
+    // Allow + NotResource grants every resource EXCEPT the ones listed, so
+    // it is treated as broad/wildcard-equivalent for the same risk checks
+    // that a literal Resource: "*" feeds (wildcard-resource, sensitive
+    // action + broad resource, and PassRole). A statement combining both
+    // Resource and NotResource is invalid AWS grammar and is intentionally
+    // excluded from this, mirroring the Action/NotAction "both" handling.
+    const resourceHasWildcard =
+      resourceSpec.mode === "include" ? resourceSpec.resources.includes("*") : resourceSpec.mode === "exclude";
     const actionsLower = actionSpec.actions.map((action) => action.toLowerCase());
 
     if (statement.Principal && JSON.stringify(statement.Principal).includes("*")) {
-      principalClaims.push(sid);
+      recordEffect(principalClaims, effect, sid);
     }
 
     if (effect === "deny") {
@@ -401,6 +456,21 @@ function analyzePolicy(policyText: string): Finding[] {
     // Deny + NotAction denies every action except the ones listed. That is
     // not a permission grant, so it is intentionally left out of every risk
     // bucket below rather than guessed at.
+
+    if (resourceSpec.mode === "exclude" && effect === "allow") {
+      // Allow + NotResource grants every resource EXCEPT the ones listed —
+      // the opposite of a narrow resource scope — so it gets its own
+      // finding below rather than being folded into the literal-Resource
+      // checks.
+      notResourceAllowGrants.push({
+        sid,
+        excludedResources: resourceSpec.resources,
+        actionHasWildcard: actionSpec.mode === "include" && actionsLower.includes("*"),
+      });
+    }
+    // Deny + NotResource denies every resource except the ones listed. That
+    // is not a permission grant, so it is intentionally left out of every
+    // risk bucket below rather than guessed at.
 
     if (actionSpec.mode === "include") {
       if (actionsLower.includes("*")) {
@@ -453,12 +523,18 @@ function analyzePolicy(policyText: string): Finding[] {
     }
   });
 
-  if (principalClaims.length > 0) {
+  if (principalClaims.allow.length > 0) {
     findings.push({
       title: "Principal",
       severity: "CRITICAL",
-      description: `Wildcard or public principals were detected in: ${principalClaims.join(", ")}.`,
+      description: `Wildcard or public principals were detected in: ${principalClaims.allow.join(", ")}.`,
       recommendation: 'Avoid "*" principal values unless there is a clear and approved public-access design. Restrict principals to trusted identities or roles.',
+    });
+  } else if (principalClaims.denyGuardrail.length > 0) {
+    findings.push({
+      title: "Principal",
+      severity: "PASS",
+      description: `Wildcard or public principal(s) appear only in explicit Deny statement(s) (${principalClaims.denyGuardrail.join(", ")}), which restricts access rather than granting it.`,
     });
   } else {
     findings.push({
@@ -541,6 +617,25 @@ function analyzePolicy(policyText: string): Finding[] {
       title: "Wildcard Resource: \"*\"",
       severity: "PASS",
       description: "The policy scopes access to specific resource paths instead of all resources.",
+    });
+  }
+
+  if (notResourceAllowGrants.length > 0) {
+    const grantHasWildcardAction = notResourceAllowGrants.some((grant) => grant.actionHasWildcard);
+    const details = notResourceAllowGrants
+      .map((grant) => `${grant.sid} (excludes ${grant.excludedResources.join(", ") || "no resources"})`)
+      .join("; ");
+    findings.push({
+      title: "NotResource broad permission scope",
+      severity: grantHasWildcardAction ? "CRITICAL" : "WARNING",
+      description: `Allow statement(s) use NotResource, which grants access to every resource EXCEPT the ones listed rather than only those resources: ${details}.`,
+      recommendation: "Prefer an explicit Resource allow-list over NotResource. If NotResource is required, scope Action narrowly and add Conditions — never combine an Allow + NotResource statement with Action \"*\".",
+    });
+  } else {
+    findings.push({
+      title: "NotResource broad permission scope",
+      severity: "PASS",
+      description: "No Allow statements use NotResource to implicitly grant access to a broad set of resources.",
     });
   }
 
@@ -786,21 +881,6 @@ function analyzePolicy(policyText: string): Finding[] {
         ? `The policy contains ${statements.length} statements, which is a normal pattern for separating access scopes.`
         : "The policy contains only one statement, which may be fine, but it reduces the ability to separate access by purpose.",
   });
-
-  if (typeof parsed === "object" && !Array.isArray(parsed) && parsed.Statement !== undefined) {
-    findings.push({
-      title: "Unsupported / unknown policy structure",
-      severity: "PASS",
-      description: "The document uses a recognizable AWS IAM policy structure with supported Statement entries.",
-    });
-  } else {
-    findings.push({
-      title: "Unsupported / unknown policy structure",
-      severity: "WARNING",
-      description: "The document does not match the typical IAM policy structure expected for JSON policy documents.",
-      recommendation: "Use a standard IAM policy document with Version and Statement keys.",
-    });
-  }
 
   return findings;
 }

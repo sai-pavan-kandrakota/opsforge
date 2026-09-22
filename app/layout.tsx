@@ -13,6 +13,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
+  metadataBase: new URL("https://opsforge-mu.vercel.app"),
   title: "OpsForge - Free DevOps, Kubernetes, Terraform & SRE Tools",
   description:
     "Free online DevOps and SRE tools for Kubernetes, Terraform, Docker, GitHub Actions, AWS IAM, networking, YAML, JSON, and incident troubleshooting.",

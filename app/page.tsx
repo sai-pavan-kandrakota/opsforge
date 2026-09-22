@@ -105,6 +105,11 @@ const comingSoonTools = [
 export default function Home() {
   const [query, setQuery] = useState("");
   const searchInputRef = useRef<HTMLInputElement>(null);
+  const [isMenuOpen, setIsMenuOpen] = useState(false);
+
+  function closeMenu() {
+    setIsMenuOpen(false);
+  }
 
   // Pressing "/" anywhere outside a form control focuses the tool search
   // input, mirroring the shortcut hint shown next to it. preventDefault()
@@ -187,7 +192,79 @@ export default function Home() {
               Coming Soon
             </a>
           </nav>
+
+          <button
+            type="button"
+            onClick={() => setIsMenuOpen((open) => !open)}
+            aria-label={isMenuOpen ? "Close menu" : "Open menu"}
+            aria-expanded={isMenuOpen}
+            aria-controls="homepage-mobile-nav"
+            className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-zinc-700 text-zinc-300 transition hover:border-zinc-500 hover:text-white md:hidden"
+          >
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth={2}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              className="h-5 w-5"
+              aria-hidden="true"
+            >
+              {isMenuOpen ? (
+                <path d="M18 6 6 18M6 6l12 12" />
+              ) : (
+                <path d="M4 6h16M4 12h16M4 18h16" />
+              )}
+            </svg>
+          </button>
         </div>
+
+        {isMenuOpen ? (
+          <nav
+            id="homepage-mobile-nav"
+            className="border-t border-zinc-800/80 px-4 py-3 text-sm text-zinc-400 md:hidden sm:px-6"
+          >
+            <div className="flex flex-col gap-1">
+              <Link
+                href="/"
+                onClick={closeMenu}
+                className="rounded-lg px-3 py-2 transition hover:bg-zinc-900 hover:text-white"
+              >
+                Home
+              </Link>
+              <a
+                href="#tools"
+                onClick={closeMenu}
+                className="rounded-lg px-3 py-2 transition hover:bg-zinc-900 hover:text-white"
+              >
+                Tools
+              </a>
+              <a
+                href="#coming-soon"
+                onClick={closeMenu}
+                className="rounded-lg px-3 py-2 transition hover:bg-zinc-900 hover:text-white"
+              >
+                Coming Soon
+              </a>
+              <Link
+                href="/about"
+                onClick={closeMenu}
+                className="rounded-lg px-3 py-2 transition hover:bg-zinc-900 hover:text-white"
+              >
+                About
+              </Link>
+              <Link
+                href="/contact"
+                onClick={closeMenu}
+                className="rounded-lg px-3 py-2 transition hover:bg-zinc-900 hover:text-white"
+              >
+                Contact
+              </Link>
+            </div>
+          </nav>
+        ) : null}
       </header>
 
       <section className="mx-auto max-w-6xl px-4 pb-20 pt-16 sm:px-6 lg:px-8 lg:pt-24">

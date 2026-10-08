@@ -1,18 +1,36 @@
 # OpsForge
 
-OpsForge is a browser-based toolkit for DevOps and SRE work. It provides a
-set of practical, self-contained utilities and static analyzers for
-Kubernetes, Terraform, Dockerfiles, GitHub Actions, Helm, AWS IAM, and
-day-to-day CI/CD and networking tasks — built with Next.js, React, and
-TypeScript.
+[![CI](https://github.com/sai-pavan-kandrakota/opsforge/actions/workflows/ci.yml/badge.svg)](https://github.com/sai-pavan-kandrakota/opsforge/actions/workflows/ci.yml)
 
-## What it provides
+**Live demo: [opsforge-mu.vercel.app](https://opsforge-mu.vercel.app/)**
 
-OpsForge provides browser-based utilities and analyzers for DevOps, Cloud,
-Kubernetes, Terraform, CI/CD, containers, AWS, and SRE workflows. Each tool
-is a focused, single-purpose page: paste input (or fill in a form), get
-results immediately, with no sign-up and no server round trip for the
-analysis itself.
+OpsForge is a browser-based toolkit of 12 DevOps and SRE tools — static
+analyzers for Kubernetes manifests, Terraform, Dockerfiles, GitHub Actions
+workflows, Helm charts, and AWS IAM policies, plus everyday utilities like a
+CIDR calculator, JSON formatter, YAML validator, and cron generator. It's
+built for engineers and SREs who want a fast, no-setup way to check
+configuration for common production-readiness and security issues before it
+ships: paste a file (or fill in a form), get results immediately, with no
+account and no server round trip for the analysis itself.
+
+## Try it online
+
+No installation needed to evaluate it — open
+**[opsforge-mu.vercel.app](https://opsforge-mu.vercel.app/)**, pick a tool,
+and paste in a real manifest, Dockerfile, workflow, or policy to see it work.
+
+## Why OpsForge
+
+- **One place for checks you'd otherwise run with separate tools or ad-hoc
+  scripts** — Kubernetes, Terraform, Dockerfile, GitHub Actions, Helm, and
+  AWS IAM, all surfaced in a consistent pass/warning/critical format.
+- **Nothing to install to try it** — every tool is a page in the browser;
+  `npm install` is only needed if you want to run it locally or read/modify
+  the source.
+- **Processing happens client-side** — pasted configuration is analyzed in
+  your browser's JavaScript, not sent to a backend for the analysis itself
+  (see [Privacy](#privacy) below for the full picture).
+- **No account required** — paste and go.
 
 ## Tools
 
